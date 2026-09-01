@@ -3,6 +3,7 @@ const mongoose = require("mongoose");
 const User = require("../models/User");
 const Attendance = require("../models/Attendance");
 const Notification = require("../models/Notification");
+const { sendWelcomeEmail } = require("../utils/sendEmail");
 
 const VALID_ROLES = ["admin", "manager", "user"];
 const VALID_STATUSES = ["Active", "Pending", "Blocked", "Inactive"];
@@ -777,13 +778,23 @@ const createUser = async (req, res) => {
           : undefined,
     });
 
+    // ============================================================
+    // SEND WELCOME EMAIL WITH LOGIN CREDENTIALS TO NEW USER
+    // ============================================================
+    try {
+      await sendWelcomeEmail(user.email, user.name, password);
+      console.log(`📧 Welcome email dispatched to new user: ${user.email}`);
+    } catch (emailErr) {
+      console.error("❌ Failed to send welcome email to new user:", emailErr.message);
+    }
+
     const safeUserData =
       safeUser(user);
 
     return res.status(201).json({
       success: true,
       message:
-        "User created successfully.",
+        "User created successfully and welcome email sent.",
       user: safeUserData,
       data: safeUserData,
     });

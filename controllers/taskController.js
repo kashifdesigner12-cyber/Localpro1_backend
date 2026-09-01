@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const Task = require("../models/Task");
 const User = require("../models/User");
 const { createNotification } = require("./notificationController");
+const { sendTaskAssignedEmail } = require("../utils/sendEmail");
 
 // ============================================================
 // CONSTANTS
@@ -820,7 +821,7 @@ const createTask = async (
       });
 
     // --------------------------------------------------------
-    // NOTIFICATION
+    // NOTIFICATION & EMAIL TO ASSIGNED USER
     // --------------------------------------------------------
 
     if (
@@ -829,6 +830,7 @@ const createTask = async (
         req.user._id
       )
     ) {
+      // In-app Notification
       try {
         await createNotification({
           userId: assigneeId,
@@ -866,6 +868,25 @@ const createTask = async (
           "Task notification error:",
           notificationError
         );
+      }
+
+      // Email Notification
+      if (assignedUser && assignedUser.email) {
+        try {
+          await sendTaskAssignedEmail(
+            assignedUser.email,
+            assignedUser.name || "Team Member",
+            req.user.name || "Admin",
+            task.title,
+            task.description,
+            task.dueDate
+          );
+        } catch (emailError) {
+          console.error(
+            "Task assignment email failed:",
+            emailError.message
+          );
+        }
       }
     }
 
@@ -2180,20 +2201,6 @@ const updateTask = async (
         req
       );
 
-    /*
-      Attachment behaviour:
-
-      1. No attachments field + no uploaded files
-         => Keep existing attachments.
-
-      2. attachments field exists
-         => Replace existing attachments
-            with supplied attachments.
-
-      3. New uploaded files
-         => Append uploaded files.
-    */
-
     if (
       bodyAttachments !==
         null ||
@@ -2294,6 +2301,7 @@ const updateTask = async (
 
     let isReassigned =
       false;
+    let newAssigneeUserObj = null;
 
     if (
       assignedTo !==
@@ -2326,6 +2334,8 @@ const updateTask = async (
             "Assigned user not found.",
         });
       }
+
+      newAssigneeUserObj = newAssignee;
 
       const previousAssignee =
         task.assignedTo
@@ -2518,12 +2528,12 @@ const updateTask = async (
     await task.save();
 
     // ========================================================
-    // NOTIFICATIONS
+    // NOTIFICATIONS & EMAILS
     // ========================================================
 
     try {
       // ------------------------------------------------------
-      // REASSIGNED
+      // REASSIGNED (In-App Notification + Email)
       // ------------------------------------------------------
 
       if (
@@ -2534,6 +2544,7 @@ const updateTask = async (
           currentUserId
         )
       ) {
+        // In-App Notification
         await createNotification({
           userId:
             task.assignedTo,
@@ -2567,6 +2578,22 @@ const updateTask = async (
               true,
           },
         });
+
+        // Email Notification for Reassignment
+        if (newAssigneeUserObj && newAssigneeUserObj.email) {
+          try {
+            await sendTaskAssignedEmail(
+              newAssigneeUserObj.email,
+              newAssigneeUserObj.name || "Team Member",
+              currentUser.name || "Admin",
+              task.title,
+              task.description,
+              task.dueDate
+            );
+          } catch (emailErr) {
+            console.error("Task reassignment email failed:", emailErr.message);
+          }
+        }
       }
 
       // ------------------------------------------------------

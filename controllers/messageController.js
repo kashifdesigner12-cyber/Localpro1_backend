@@ -3,6 +3,7 @@ const Message = require('../models/Message');
 const Conversation = require('../models/Conversation');
 const User = require('../models/User');
 const { createNotification } = require('./notificationController');
+const { sendMessageNotificationEmail } = require('../utils/sendEmail');
 
 const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 
@@ -333,7 +334,11 @@ const sendMessage = async (req, res) => {
       .populate('sender', 'name email role avatar')
       .populate('recipient', 'name email role avatar');
 
+    // --------------------------------------------------------
+    // NOTIFICATION & EMAIL TO RECIPIENT
+    // --------------------------------------------------------
     if (resolvedRecipientId && resolvedRecipientId.toString() !== req.user._id.toString()) {
+      // 1. In-App Notification
       try {
         await createNotification({
           userId: resolvedRecipientId,
@@ -352,6 +357,21 @@ const sendMessage = async (req, res) => {
         });
       } catch (notifErr) {
         console.error('Message notification error:', notifErr);
+      }
+
+      // 2. Email Notification to Recipient
+      try {
+        const recipientUser = populated.recipient || (await User.findById(resolvedRecipientId).select('name email'));
+        if (recipientUser && recipientUser.email) {
+          await sendMessageNotificationEmail(
+            recipientUser.email,
+            recipientUser.name || 'User',
+            req.user.name || 'Admin',
+            previewText
+          );
+        }
+      } catch (emailErr) {
+        console.error('Message notification email failed:', emailErr.message);
       }
     }
 

@@ -1,5 +1,6 @@
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
+const { sendWelcomeEmail } = require("../utils/sendEmail");
 
 // ==========================================
 // Build Safe User Object
@@ -49,7 +50,6 @@ const generateToken = (id, role) =>
 // ==========================================
 // Cookie Configuration
 // ==========================================
-
 const getCookieOptions = () => ({
   httpOnly: true,
 
@@ -107,9 +107,16 @@ const register = async (req, res) => {
       role: role || "user",
     });
 
+    // Send Welcome Email with credentials
+    try {
+      await sendWelcomeEmail(user.email, user.name, password);
+    } catch (emailError) {
+      console.error("Failed to send welcome email:", emailError);
+    }
+
     return res.status(201).json({
       success: true,
-      message: "Registration successful.",
+      message: "Registration successful. Credentials email sent to user.",
       user: safeUser(user),
     });
   } catch (error) {
