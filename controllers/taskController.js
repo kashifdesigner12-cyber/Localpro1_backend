@@ -2,7 +2,7 @@ const mongoose = require("mongoose");
 const Task = require("../models/Task");
 const User = require("../models/User");
 const { createNotification } = require("./notificationController");
-const { sendTaskAssignedEmail } = require("../utils/sendEmail");
+const { sendTaskAssignedEmail, sendTaskCompletedEmail } = require("../utils/sendEmail");
 
 // ============================================================
 // CONSTANTS
@@ -2039,7 +2039,7 @@ const updateTask = async (
       await task.save();
 
       // ------------------------------------------------------
-      // NOTIFY CREATOR
+      // NOTIFY & EMAIL CREATOR (ADMIN/MANAGER) ON COMPLETION
       // ------------------------------------------------------
 
       if (
@@ -2051,6 +2051,7 @@ const updateTask = async (
           currentUserId
         )
       ) {
+        // In-app Notification
         try {
           await createNotification({
             userId:
@@ -2089,6 +2090,25 @@ const updateTask = async (
           console.error(
             "Notification error in status update:",
             notificationError
+          );
+        }
+
+        // Email to Task Creator (Admin/Manager)
+        try {
+          const creatorUser = await User.findById(task.createdBy).select("name email");
+          if (creatorUser && creatorUser.email) {
+            await sendTaskCompletedEmail(
+              creatorUser.email,
+              creatorUser.name || "Manager",
+              currentUser.name || "Team Member",
+              task.title,
+              task.completedAt || new Date()
+            );
+          }
+        } catch (emailError) {
+          console.error(
+            "Task completion email to creator failed:",
+            emailError.message
           );
         }
       }
@@ -2613,6 +2633,7 @@ const updateTask = async (
             currentUserId
           )
         ) {
+          // In-App Notification
           await createNotification({
             userId:
               task.createdBy,
@@ -2646,6 +2667,25 @@ const updateTask = async (
                 currentUserId,
             },
           });
+
+          // Email Notification to Task Creator (Admin/Manager)
+          try {
+            const creatorUser = await User.findById(task.createdBy).select("name email");
+            if (creatorUser && creatorUser.email) {
+              await sendTaskCompletedEmail(
+                creatorUser.email,
+                creatorUser.name || "Manager",
+                currentUser.name || "Team Member",
+                task.title,
+                task.completedAt || new Date()
+              );
+            }
+          } catch (emailError) {
+            console.error(
+              "Task completion email to creator failed:",
+              emailError.message
+            );
+          }
         }
 
         // Other status updates

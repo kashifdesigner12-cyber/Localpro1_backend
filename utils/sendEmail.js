@@ -21,7 +21,7 @@ transporter.verify((error, success) => {
 });
 
 /**
- * 1. Welcome Email (Existing)
+ * 1. Welcome Email
  */
 const sendWelcomeEmail = async (targetUserEmail, targetUserName, rawPassword) => {
   try {
@@ -219,8 +219,72 @@ const sendTaskAssignedEmail = async (targetUserEmail, targetUserName, assignerNa
   }
 };
 
+/**
+ * 4. Task Completed Notification Email (Sent to Admin / Creator)
+ */
+const sendTaskCompletedEmail = async (creatorEmail, creatorName, completedByName, taskTitle, completedAt) => {
+  try {
+    const portalUrl = process.env.FRONTEND_APP_URL || process.env.FRONTEND_LOGIN_URL || "http://localhost:3000";
+
+    const mailOptions = {
+      from: `"LocalPro Tasks" <${process.env.EMAIL_USER}>`,
+      to: creatorEmail,
+      subject: `Task Completed: ${taskTitle}`,
+      html: `
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+        <body style="margin: 0; padding: 0; background-color: #f4f7fa; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+          <table border="0" cellpadding="0" cellspacing="0" width="100%" style="padding: 40px 0;">
+            <tr>
+              <td align="center">
+                <table border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 600px; background-color: #ffffff; border-radius: 12px; overflow: hidden; border: 1px solid #e2e8f0;">
+                  <tr>
+                    <td style="background: linear-gradient(135deg, #10b981 0%, #059669 100%); padding: 30px 40px; text-align: center;">
+                      <h1 style="color: #ffffff; margin: 0; font-size: 22px;">Task Marked as Completed</h1>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 36px 40px 24px 40px;">
+                      <h2 style="color: #0f172a; margin: 0 0 12px 0; font-size: 18px;">Hello ${creatorName},</h2>
+                      <p style="color: #475569; font-size: 15px; margin: 0 0 20px 0;">
+                        <strong>${completedByName}</strong> has successfully completed the assigned task.
+                      </p>
+                      
+                      <div style="background-color: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 20px; margin-bottom: 26px;">
+                        <h3 style="color: #166534; margin: 0 0 8px 0; font-size: 16px;">${taskTitle}</h3>
+                        <p style="color: #15803d; font-size: 13px; font-weight: 600; margin: 0;">Status: Completed</p>
+                        <p style="color: #64748b; font-size: 13px; margin: 6px 0 0 0;">Completed Date: ${new Date(completedAt || Date.now()).toLocaleString()}</p>
+                      </div>
+
+                      <div style="text-align: center; margin-bottom: 25px;">
+                        <a href="${portalUrl}" target="_blank" style="background-color: #10b981; color: #ffffff; padding: 12px 28px; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 6px; display: inline-block;">
+                          Review Completed Task
+                        </a>
+                      </div>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
+        </body>
+        </html>
+      `,
+    };
+
+    const info = await transporter.sendMail(mailOptions);
+    console.log("✅ Task completed email sent to:", creatorEmail);
+    return info;
+  } catch (err) {
+    console.error("❌ SendTaskCompletedEmail failed:", err);
+    throw err;
+  }
+};
+
 module.exports = {
   sendWelcomeEmail,
   sendMessageNotificationEmail,
   sendTaskAssignedEmail,
+  sendTaskCompletedEmail,
 };
