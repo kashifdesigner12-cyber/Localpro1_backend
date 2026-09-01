@@ -1,51 +1,85 @@
-const mongoose = require('mongoose');
-const Task = require('../models/Task');
-const User = require('../models/User');
-const { createNotification } = require('./notificationController');
+const mongoose = require("mongoose");
+const Task = require("../models/Task");
+const User = require("../models/User");
+const { createNotification } = require("./notificationController");
 
-const isValidObjectId = (id) =>
-  mongoose.Types.ObjectId.isValid(id);
+// ============================================================
+// CONSTANTS
+// ============================================================
 
 const VALID_PRIORITIES = [
-  'Low',
-  'Medium',
-  'High',
-  'Urgent'
+  "Low",
+  "Medium",
+  "High",
+  "Urgent",
 ];
 
 const VALID_STATUSES = [
-  'Pending',
-  'In Progress',
-  'Completed',
-  'Cancelled'
+  "Pending",
+  "In Progress",
+  "Completed",
+  "Cancelled",
 ];
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================
 // HELPERS
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================
 
-const getUserRole = (user) =>
-  String(user?.role || '').trim().toLowerCase();
+const isValidObjectId = (id) => {
+  return Boolean(id) && mongoose.Types.ObjectId.isValid(id);
+};
+
+const getUserRole = (user) => {
+  return String(user?.role || "")
+    .trim()
+    .toLowerCase();
+};
 
 const isAdminOrManager = (user) => {
   const role = getUserRole(user);
-  return role === 'admin' || role === 'manager';
+
+  return role === "admin" || role === "manager";
 };
+
+const sameId = (a, b) => {
+  if (!a || !b) return false;
+
+  return String(a) === String(b);
+};
+
+// Escape regex characters so search text cannot break RegExp.
+const escapeRegex = (value) => {
+  return String(value).replace(
+    /[.*+?^${}()|[\]\\]/g,
+    "\\$&"
+  );
+};
+
+// ============================================================
+// SAFE USER
+// ============================================================
 
 const safeUserRef = (user) => {
   if (!user) return null;
 
-  if (typeof user === 'object' && user._id) {
+  // Populated user
+  if (
+    typeof user === "object" &&
+    user._id
+  ) {
     return {
       id: user._id,
       _id: user._id,
-      name: user.name,
-      email: user.email,
+      name: user.name || "",
+      email: user.email || "",
       phone:
         user.phone !== undefined
           ? user.phone
           : undefined,
-      role: user.role,
+      role:
+        user.role !== undefined
+          ? user.role
+          : undefined,
       status:
         user.status !== undefined
           ? user.status
@@ -53,28 +87,34 @@ const safeUserRef = (user) => {
       avatar:
         user.avatar !== undefined
           ? user.avatar
-          : undefined
+          : undefined,
     };
   }
 
   return user;
 };
 
+// ============================================================
+// SAFE CONTACT
+// ============================================================
+
 const safeContactRef = (contact) => {
   if (!contact) return null;
 
   if (
-    typeof contact === 'object' &&
+    typeof contact === "object" &&
     contact._id
   ) {
+    const fullName =
+      contact.name ||
+      `${contact.firstName || ""} ${
+        contact.lastName || ""
+      }`.trim();
+
     return {
       id: contact._id,
       _id: contact._id,
-      name:
-        contact.name ||
-        `${contact.firstName || ''} ${
-          contact.lastName || ''
-        }`.trim(),
+      name: fullName,
       email:
         contact.email !== undefined
           ? contact.email
@@ -86,150 +126,453 @@ const safeContactRef = (contact) => {
       company:
         contact.company !== undefined
           ? contact.company
-          : undefined
+          : undefined,
     };
   }
 
   return contact;
 };
 
-const safeTask = (task) => ({
-  id: task._id,
-  _id: task._id,
+// ============================================================
+// ATTACHMENTS
+// ============================================================
 
-  title: task.title,
+const normalizeAttachments = (attachments, userId = null) => {
+  if (!Array.isArray(attachments)) {
+    return [];
+  }
 
-  description:
-    task.description || '',
+  return attachments
+    .filter(Boolean)
+    .map((attachment) => {
+      if (
+        typeof attachment !== "object"
+      ) {
+        return null;
+      }
 
-  category:
-    task.category || 'General',
+      const url =
+        attachment.url ||
+        attachment.path ||
+        attachment.secure_url ||
+        "";
 
-  createdBy:
-    safeUserRef(task.createdBy),
-
-  assignedTo:
-    safeUserRef(task.assignedTo),
-
-  contact:
-    safeContactRef(
-      task.contact || task.contactId
-    ),
-
-  contactId: task.contact
-    ? task.contact._id || task.contact
-    : task.contactId
-      ? task.contactId._id || task.contactId
-      : null,
-
-  priority: task.priority,
-
-  status: task.status,
-
-  dueDate:
-    task.dueDate || null,
-
-  completedAt:
-    task.completedAt || null,
-
-  attachments:
-    Array.isArray(task.attachments)
-      ? task.attachments
-      : [],
-
-  comments:
-    Array.isArray(task.comments)
-      ? task.comments.map((comment) => ({
-          id: comment._id,
-          _id: comment._id,
-          user: safeUserRef(comment.user),
-          text: comment.text,
-          createdAt: comment.createdAt
-        }))
-      : [],
-
-  activity:
-    Array.isArray(task.activity)
-      ? task.activity.map((activity) => ({
-          id: activity._id,
-          _id: activity._id,
-          user: safeUserRef(activity.user),
-          action: activity.action,
-          details: activity.details,
-          timestamp: activity.timestamp
-        }))
-      : [],
-
-  createdAt:
-    task.createdAt,
-
-  updatedAt:
-    task.updatedAt
-});
-
-const populateTask = (query) =>
-  query
-    .populate(
-      'createdBy',
-      'name email role phone status avatar'
-    )
-    .populate(
-      'assignedTo',
-      'name email role phone status avatar'
-    )
-    .populate(
-      'contact',
-      'name firstName lastName email phone company'
-    )
-    .populate(
-      'comments.user',
-      'name email role avatar'
-    )
-    .populate(
-      'activity.user',
-      'name email role avatar'
+      return {
+        url: String(url),
+        filename:
+          attachment.filename ||
+          attachment.originalname ||
+          "attachment",
+        originalName:
+          attachment.originalName ||
+          attachment.originalname ||
+          attachment.filename ||
+          "attachment",
+        fileType:
+          attachment.fileType ||
+          attachment.mimetype ||
+          "",
+        size:
+          Number(attachment.size) || 0,
+        uploadedBy:
+          attachment.uploadedBy || userId || null,
+        uploadedAt:
+          attachment.uploadedAt || new Date(),
+      };
+    })
+    .filter(
+      (attachment) =>
+        attachment &&
+        attachment.url
     );
+};
+
+const getUploadedAttachments = (req) => {
+  let files = [];
+
+  // Single file uploaded via upload.single('file')
+  if (req.file) {
+    files = [req.file];
+  }
+  // Multiple files uploaded via upload.array('files')
+  else if (Array.isArray(req.files)) {
+    files = req.files;
+  }
+  // Multiple fields uploaded via upload.fields(...)
+  else if (
+    req.files &&
+    typeof req.files === "object"
+  ) {
+    files = Object.values(
+      req.files
+    ).flat();
+  }
+
+  if (!files.length) {
+    return [];
+  }
+
+  const userId = req.user?._id || null;
+
+  return files
+    .filter(Boolean)
+    .map((file) => {
+      // Local multer file path setup or cloud URL
+      const url =
+        file.secure_url ||
+        file.url ||
+        (file.filename ? `/uploads/${file.filename}` : file.path) ||
+        "";
+
+      return {
+        url: String(url),
+        filename:
+          file.filename ||
+          file.originalname ||
+          "attachment",
+        originalName:
+          file.originalname ||
+          file.filename ||
+          "attachment",
+        fileType:
+          file.mimetype ||
+          file.fileType ||
+          "",
+        size:
+          Number(file.size) || 0,
+        uploadedBy: userId,
+        uploadedAt: new Date(),
+      };
+    })
+    .filter(
+      (attachment) =>
+        attachment.url
+    );
+};
+
+const parseBodyAttachments = (
+  attachments,
+  userId = null
+) => {
+  if (
+    attachments === undefined ||
+    attachments === null ||
+    attachments === ""
+  ) {
+    return null;
+  }
+
+  if (Array.isArray(attachments)) {
+    return normalizeAttachments(
+      attachments,
+      userId
+    );
+  }
+
+  if (typeof attachments === "string") {
+    try {
+      const parsed =
+        JSON.parse(attachments);
+
+      if (Array.isArray(parsed)) {
+        return normalizeAttachments(
+          parsed,
+          userId
+        );
+      }
+
+      return [];
+    } catch (error) {
+      return [];
+    }
+  }
+
+  return [];
+};
+
+const getRequestAttachments = (req) => {
+  const userId = req.user?._id || null;
+  const bodyAttachments =
+    parseBodyAttachments(
+      req.body?.attachments,
+      userId
+    );
+
+  const uploadedAttachments =
+    getUploadedAttachments(req);
+
+  return [
+    ...(bodyAttachments || []),
+    ...uploadedAttachments,
+  ];
+};
+
+// ============================================================
+// SAFE TASK
+// ============================================================
+
+const safeTask = (task) => {
+  if (!task) return null;
+
+  const contactValue =
+    task.contact ||
+    task.contactId ||
+    null;
+
+  return {
+    id: task._id,
+    _id: task._id,
+
+    title: task.title || "",
+
+    description:
+      task.description || "",
+
+    category:
+      task.category || "General",
+
+    createdBy:
+      safeUserRef(task.createdBy),
+
+    assignedTo:
+      safeUserRef(task.assignedTo),
+
+    contact:
+      safeContactRef(contactValue),
+
+    contactId:
+      contactValue
+        ? contactValue._id ||
+          contactValue
+        : null,
+
+    priority:
+      task.priority || "Medium",
+
+    status:
+      task.status || "Pending",
+
+    dueDate:
+      task.dueDate || null,
+
+    completedAt:
+      task.completedAt || null,
+
+    attachments:
+      Array.isArray(task.attachments)
+        ? task.attachments.map(
+            (attachment) => ({
+              id: attachment._id,
+              _id: attachment._id,
+
+              url:
+                attachment.url || "",
+
+              filename:
+                attachment.filename ||
+                "",
+
+              originalName:
+                attachment.originalName ||
+                attachment.filename ||
+                "",
+
+              fileType:
+                attachment.fileType ||
+                "",
+
+              size:
+                Number(
+                  attachment.size
+                ) || 0,
+
+              uploadedBy:
+                attachment.uploadedBy || null,
+
+              uploadedAt:
+                attachment.uploadedAt || null,
+            })
+          )
+        : [],
+
+    comments:
+      Array.isArray(task.comments)
+        ? task.comments.map(
+            (comment) => ({
+              id: comment._id,
+              _id: comment._id,
+
+              user:
+                safeUserRef(
+                  comment.user
+                ),
+
+              text:
+                comment.text || "",
+
+              createdAt:
+                comment.createdAt,
+            })
+          )
+        : [],
+
+    activity:
+      Array.isArray(task.activity)
+        ? task.activity.map(
+            (activity) => ({
+              id: activity._id,
+              _id: activity._id,
+
+              user:
+                safeUserRef(
+                  activity.user
+                ),
+
+              action:
+                activity.action || "",
+
+              details:
+                activity.details || "",
+
+              timestamp:
+                activity.timestamp,
+            })
+          )
+        : [],
+
+    createdAt:
+      task.createdAt,
+
+    updatedAt:
+      task.updatedAt,
+  };
+};
+
+// ============================================================
+// POPULATE TASK
+// ============================================================
+
+const populateTask = (query) => {
+  return query
+    .populate(
+      "createdBy",
+      "name email role phone status avatar"
+    )
+    .populate(
+      "assignedTo",
+      "name email role phone status avatar"
+    )
+    .populate(
+      "contact",
+      "name firstName lastName email phone company"
+    )
+    .populate(
+      "comments.user",
+      "name email role avatar"
+    )
+    .populate(
+      "activity.user",
+      "name email role avatar"
+    );
+};
+
+// ============================================================
+// SORT
+// ============================================================
 
 const getSortOption = (sort) => {
   switch (sort) {
-    case 'dueDate':
-    case 'due':
-      return { dueDate: 1 };
+    case "dueDate":
+    case "due":
+      return {
+        dueDate: 1,
+      };
 
-    case '-dueDate':
-      return { dueDate: -1 };
+    case "-dueDate":
+      return {
+        dueDate: -1,
+      };
 
-    case 'oldest':
-    case 'createdAt':
-      return { createdAt: 1 };
+    case "oldest":
+    case "createdAt":
+      return {
+        createdAt: 1,
+      };
 
-    case 'newest':
-    case '-createdAt':
-      return { createdAt: -1 };
+    case "newest":
+    case "-createdAt":
+      return {
+        createdAt: -1,
+      };
 
-    case 'priority':
-      return { priority: 1 };
+    case "priority":
+      return {
+        priority: 1,
+      };
 
-    case '-priority':
-      return { priority: -1 };
+    case "-priority":
+      return {
+        priority: -1,
+      };
 
-    case 'status':
-      return { status: 1 };
+    case "status":
+      return {
+        status: 1,
+      };
 
-    case '-status':
-      return { status: -1 };
+    case "-status":
+      return {
+        status: -1,
+      };
 
     default:
-      return { createdAt: -1 };
+      return {
+        createdAt: -1,
+      };
   }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================
+// PAGINATION
+// ============================================================
+
+const getPagination = (
+  page,
+  limit
+) => {
+  const pageNum = Math.max(
+    1,
+    parseInt(page, 10) || 1
+  );
+
+  const limitNum = Math.min(
+    100,
+    Math.max(
+      1,
+      parseInt(limit, 10) || 20
+    )
+  );
+
+  const skip =
+    (pageNum - 1) *
+    limitNum;
+
+  return {
+    pageNum,
+    limitNum,
+    skip,
+  };
+};
+
+// ============================================================
 // CREATE TASK
 // POST /api/tasks
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================
 
-const createTask = async (req, res) => {
+const createTask = async (
+  req,
+  res
+) => {
   try {
     const {
       title,
@@ -241,208 +584,345 @@ const createTask = async (req, res) => {
       status,
       dueDate,
       category,
-      attachments
     } = req.body;
 
-    if (!title || !String(title).trim()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Task title is required.'
-      });
-    }
+    // --------------------------------------------------------
+    // TITLE
+    // --------------------------------------------------------
 
-    if (String(title).trim().length < 3) {
+    if (
+      !title ||
+      !String(title).trim()
+    ) {
       return res.status(400).json({
         success: false,
         message:
-          'Title must be at least 3 characters long.'
+          "Task title is required.",
       });
     }
 
-    const assigneeId =
-      assignedTo || req.user._id;
+    const cleanTitle =
+      String(title).trim();
 
-    if (!isValidObjectId(assigneeId)) {
+    if (cleanTitle.length < 3) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid assigned user ID.'
+        message:
+          "Title must be at least 3 characters long.",
+      });
+    }
+
+    // --------------------------------------------------------
+    // ASSIGNEE
+    // --------------------------------------------------------
+
+    const assigneeId =
+      assignedTo ||
+      req.user._id;
+
+    if (
+      !isValidObjectId(
+        assigneeId
+      )
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Invalid assigned user ID.",
       });
     }
 
     const assignedUser =
-      await User.findById(assigneeId);
+      await User.findById(
+        assigneeId
+      ).select(
+        "name email role status"
+      );
 
     if (!assignedUser) {
       return res.status(404).json({
         success: false,
-        message: 'Assigned user not found.'
+        message:
+          "Assigned user not found.",
       });
     }
 
+    // --------------------------------------------------------
+    // CONTACT
+    // --------------------------------------------------------
+
     const targetContactId =
-      contact || contactId || null;
+      contact ||
+      contactId ||
+      null;
 
     if (
       targetContactId &&
-      !isValidObjectId(targetContactId)
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid contact ID.'
-      });
-    }
-
-    if (
-      priority &&
-      !VALID_PRIORITIES.includes(priority)
+      !isValidObjectId(
+        targetContactId
+      )
     ) {
       return res.status(400).json({
         success: false,
         message:
-          `Invalid priority. Allowed: ${VALID_PRIORITIES.join(', ')}.`
+          "Invalid contact ID.",
       });
     }
 
+    // --------------------------------------------------------
+    // PRIORITY
+    // --------------------------------------------------------
+
+    const taskPriority =
+      priority || "Medium";
+
     if (
-      status &&
-      !VALID_STATUSES.includes(status)
+      !VALID_PRIORITIES.includes(
+        taskPriority
+      )
     ) {
       return res.status(400).json({
         success: false,
         message:
-          `Invalid status. Allowed: ${VALID_STATUSES.join(', ')}.`
+          `Invalid priority. Allowed: ${VALID_PRIORITIES.join(
+            ", "
+          )}.`,
       });
     }
+
+    // --------------------------------------------------------
+    // STATUS
+    // --------------------------------------------------------
+
+    const taskStatus =
+      status || "Pending";
+
+    if (
+      !VALID_STATUSES.includes(
+        taskStatus
+      )
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          `Invalid status. Allowed: ${VALID_STATUSES.join(
+            ", "
+          )}.`,
+      });
+    }
+
+    // --------------------------------------------------------
+    // DUE DATE
+    // --------------------------------------------------------
 
     let parsedDueDate = null;
 
-    if (dueDate) {
-      parsedDueDate = new Date(dueDate);
+    if (
+      dueDate !== undefined &&
+      dueDate !== null &&
+      dueDate !== ""
+    ) {
+      parsedDueDate =
+        new Date(dueDate);
 
-      if (isNaN(parsedDueDate.getTime())) {
+      if (
+        Number.isNaN(
+          parsedDueDate.getTime()
+        )
+      ) {
         return res.status(400).json({
           success: false,
-          message: 'Invalid due date.'
+          message:
+            "Invalid due date.",
         });
       }
     }
 
-    const taskStatus =
-      status || 'Pending';
+    // --------------------------------------------------------
+    // ATTACHMENTS
+    // --------------------------------------------------------
+
+    const taskAttachments =
+      getRequestAttachments(req);
+
+    // --------------------------------------------------------
+    // ACTIVITY
+    // --------------------------------------------------------
 
     const initialActivity = [
       {
         user: req.user._id,
-        action: 'created',
-        details: 'Task created',
-        timestamp: new Date()
-      }
+        action: "created",
+        details:
+          taskAttachments.length > 0
+            ? `Task created with ${taskAttachments.length} attachment(s)`
+            : "Task created",
+        timestamp: new Date(),
+      },
     ];
 
-    const task = await Task.create({
-      title: String(title).trim(),
+    // --------------------------------------------------------
+    // CREATE
+    // --------------------------------------------------------
 
-      description: description
-        ? String(description).trim()
-        : '',
+    const task =
+      await Task.create({
+        title: cleanTitle,
 
-      category: category
-        ? String(category).trim()
-        : 'General',
+        description:
+          description
+            ? String(
+                description
+              ).trim()
+            : "",
 
-      createdBy: req.user._id,
+        category:
+          category
+            ? String(
+                category
+              ).trim()
+            : "General",
 
-      assignedTo: assigneeId,
+        createdBy:
+          req.user._id,
 
-      contact: targetContactId,
+        assignedTo:
+          assigneeId,
 
-      contactId: targetContactId,
+        contact:
+          targetContactId,
 
-      priority:
-        priority || 'Medium',
+        contactId:
+          targetContactId,
 
-      status: taskStatus,
+        priority:
+          taskPriority,
 
-      dueDate: parsedDueDate,
+        status:
+          taskStatus,
 
-      completedAt:
-        taskStatus === 'Completed'
-          ? new Date()
-          : null,
+        dueDate:
+          parsedDueDate,
 
-      attachments:
-        Array.isArray(attachments)
-          ? attachments
-          : [],
+        completedAt:
+          taskStatus ===
+          "Completed"
+            ? new Date()
+            : null,
 
-      comments: [],
+        attachments:
+          taskAttachments,
 
-      activity: initialActivity
-    });
+        comments: [],
 
-    const populated =
-      await populateTask(
-        Task.findById(task._id)
-      );
+        activity:
+          initialActivity,
+      });
+
+    // --------------------------------------------------------
+    // NOTIFICATION
+    // --------------------------------------------------------
 
     if (
-      assigneeId.toString() !==
-      req.user._id.toString()
+      !sameId(
+        assigneeId,
+        req.user._id
+      )
     ) {
       try {
         await createNotification({
           userId: assigneeId,
-          type: 'task',
-          title: 'New Task Assigned',
+
+          type: "task",
+
+          title:
+            "New Task Assigned",
+
           message:
             `A new task "${task.title}" has been assigned to you.`,
-          relatedId: task._id,
-          relatedType: 'Task',
-          actionUrl: '/dashboard/tasks',
+
+          relatedId:
+            task._id,
+
+          relatedType:
+            "Task",
+
+          actionUrl:
+            "/dashboard/tasks",
+
           metadata: {
-            taskId: task._id,
-            title: task.title,
-            priority: task.priority
-          }
+            taskId:
+              task._id,
+
+            title:
+              task.title,
+
+            priority:
+              task.priority,
+          },
         });
-      } catch (notifErr) {
+      } catch (notificationError) {
         console.error(
-          'Task notification error:',
-          notifErr
+          "Task notification error:",
+          notificationError
         );
       }
     }
+
+    // --------------------------------------------------------
+    // RESPONSE
+    // --------------------------------------------------------
+
+    const populated =
+      await populateTask(
+        Task.findById(
+          task._id
+        )
+      );
 
     const formattedTask =
       safeTask(populated);
 
     return res.status(201).json({
       success: true,
+
       message:
-        'Task created successfully.',
-      task: formattedTask,
-      data: formattedTask
+        "Task created successfully.",
+
+      task:
+        formattedTask,
+
+      data:
+        formattedTask,
     });
   } catch (error) {
     console.error(
-      'createTask error:',
+      "createTask error:",
       error
     );
 
     return res.status(500).json({
       success: false,
       message:
-        'Server error creating task.'
+        "Server error creating task.",
+      error:
+        process.env.NODE_ENV ===
+        "development"
+          ? error.message
+          : undefined,
     });
   }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================
 // GET ALL TASKS
 // GET /api/tasks
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================
 
-const getAllTasks = async (req, res) => {
+const getAllTasks = async (
+  req,
+  res
+) => {
   try {
     const {
       page = 1,
@@ -458,55 +938,83 @@ const getAllTasks = async (req, res) => {
       overdue,
       startDate,
       endDate,
-      sort = '-createdAt'
+      sort = "-createdAt",
     } = req.query;
 
     const filter = {};
 
-    if (!isAdminOrManager(req.user)) {
+    // --------------------------------------------------------
+    // ROLE FILTER
+    // --------------------------------------------------------
+
+    if (
+      !isAdminOrManager(
+        req.user
+      )
+    ) {
       filter.$or = [
         {
-          assignedTo: req.user._id
+          assignedTo:
+            req.user._id,
         },
         {
-          createdBy: req.user._id
-        }
+          createdBy:
+            req.user._id,
+        },
       ];
     } else {
       if (assignedTo) {
-        if (!isValidObjectId(assignedTo)) {
+        if (
+          !isValidObjectId(
+            assignedTo
+          )
+        ) {
           return res.status(400).json({
             success: false,
             message:
-              'Invalid assignedTo filter ID.'
+              "Invalid assignedTo filter ID.",
           });
         }
 
-        filter.assignedTo = assignedTo;
+        filter.assignedTo =
+          assignedTo;
       }
 
       if (createdBy) {
-        if (!isValidObjectId(createdBy)) {
+        if (
+          !isValidObjectId(
+            createdBy
+          )
+        ) {
           return res.status(400).json({
             success: false,
             message:
-              'Invalid createdBy filter ID.'
+              "Invalid createdBy filter ID.",
           });
         }
 
-        filter.createdBy = createdBy;
+        filter.createdBy =
+          createdBy;
       }
     }
+
+    // --------------------------------------------------------
+    // CONTACT FILTER
+    // --------------------------------------------------------
 
     const targetContact =
       contact || contactId;
 
     if (targetContact) {
-      if (!isValidObjectId(targetContact)) {
+      if (
+        !isValidObjectId(
+          targetContact
+        )
+      ) {
         return res.status(400).json({
           success: false,
           message:
-            'Invalid contact filter ID.'
+            "Invalid contact filter ID.",
         });
       }
 
@@ -516,64 +1024,102 @@ const getAllTasks = async (req, res) => {
       filter.$and.push({
         $or: [
           {
-            contact: targetContact
+            contact:
+              targetContact,
           },
           {
-            contactId: targetContact
-          }
-        ]
+            contactId:
+              targetContact,
+          },
+        ],
       });
     }
 
+    // --------------------------------------------------------
+    // CATEGORY
+    // --------------------------------------------------------
+
     if (category) {
-      filter.category = category;
+      filter.category =
+        category;
     }
+
+    // --------------------------------------------------------
+    // STATUS
+    // --------------------------------------------------------
 
     if (status) {
-      if (!VALID_STATUSES.includes(status)) {
+      if (
+        !VALID_STATUSES.includes(
+          status
+        )
+      ) {
         return res.status(400).json({
           success: false,
           message:
-            `Invalid status filter. Allowed: ${VALID_STATUSES.join(', ')}.`
+            `Invalid status filter. Allowed: ${VALID_STATUSES.join(
+              ", "
+            )}.`,
         });
       }
 
-      filter.status = status;
+      filter.status =
+        status;
     }
+
+    // --------------------------------------------------------
+    // PRIORITY
+    // --------------------------------------------------------
 
     if (priority) {
-      if (!VALID_PRIORITIES.includes(priority)) {
+      if (
+        !VALID_PRIORITIES.includes(
+          priority
+        )
+      ) {
         return res.status(400).json({
           success: false,
           message:
-            `Invalid priority filter. Allowed: ${VALID_PRIORITIES.join(', ')}.`
+            `Invalid priority filter. Allowed: ${VALID_PRIORITIES.join(
+              ", "
+            )}.`,
         });
       }
 
-      filter.priority = priority;
+      filter.priority =
+        priority;
     }
+
+    // --------------------------------------------------------
+    // SEARCH
+    // --------------------------------------------------------
 
     if (
       search &&
       String(search).trim()
     ) {
-      const regex = new RegExp(
-        String(search).trim(),
-        'i'
-      );
+      const regex =
+        new RegExp(
+          escapeRegex(
+            String(search).trim()
+          ),
+          "i"
+        );
 
       const searchCondition = {
         $or: [
           {
-            title: regex
+            title: regex,
           },
           {
-            description: regex
+            description:
+              regex,
           },
           {
-            category: regex
-          }
-        ]
+            category:
+              regex,
+          },
+        ],
       };
 
       if (filter.$or) {
@@ -581,7 +1127,7 @@ const getAllTasks = async (req, res) => {
           filter.$and || [];
 
         filter.$and.push({
-          $or: filter.$or
+          $or: filter.$or,
         });
 
         filter.$and.push(
@@ -595,37 +1141,55 @@ const getAllTasks = async (req, res) => {
       }
     }
 
-    if (overdue === 'true') {
-      filter.dueDate = {
-        ...(filter.dueDate || {}),
-        $lt: new Date()
-      };
+    // --------------------------------------------------------
+    // OVERDUE
+    // --------------------------------------------------------
 
-      filter.status = {
-        $nin: [
-          'Completed',
-          'Cancelled'
-        ]
-      };
+    if (overdue === "true") {
+      filter.$and =
+        filter.$and || [];
+
+      filter.$and.push({
+        dueDate: {
+          $lt: new Date(),
+          $ne: null,
+        },
+      });
+
+      filter.$and.push({
+        status: {
+          $nin: [
+            "Completed",
+            "Cancelled",
+          ],
+        },
+      });
     }
 
+    // --------------------------------------------------------
+    // DATE RANGE
+    // --------------------------------------------------------
+
     if (startDate || endDate) {
-      filter.dueDate =
-        filter.dueDate || {};
+      const dueDateFilter = {};
 
       if (startDate) {
         const start =
           new Date(startDate);
 
-        if (isNaN(start.getTime())) {
+        if (
+          Number.isNaN(
+            start.getTime()
+          )
+        ) {
           return res.status(400).json({
             success: false,
             message:
-              'Invalid startDate.'
+              "Invalid startDate.",
           });
         }
 
-        filter.dueDate.$gte =
+        dueDateFilter.$gte =
           start;
       }
 
@@ -633,100 +1197,142 @@ const getAllTasks = async (req, res) => {
         const end =
           new Date(endDate);
 
-        if (isNaN(end.getTime())) {
+        if (
+          Number.isNaN(
+            end.getTime()
+          )
+        ) {
           return res.status(400).json({
             success: false,
             message:
-              'Invalid endDate.'
+              "Invalid endDate.",
           });
         }
 
-        filter.dueDate.$lte =
+        // Include entire end day
+        end.setHours(
+          23,
+          59,
+          59,
+          999
+        );
+
+        dueDateFilter.$lte =
           end;
       }
+
+      filter.dueDate =
+        dueDateFilter;
     }
 
-    const pageNum =
-      Math.max(
-        1,
-        parseInt(page) || 1
-      );
+    // --------------------------------------------------------
+    // PAGINATION
+    // --------------------------------------------------------
 
-    const limitNum =
-      Math.min(
-        100,
-        Math.max(
-          1,
-          parseInt(limit) || 20
-        )
-      );
+    const {
+      pageNum,
+      limitNum,
+      skip,
+    } = getPagination(
+      page,
+      limit
+    );
 
-    const skip =
-      (pageNum - 1) *
-      limitNum;
+    // --------------------------------------------------------
+    // QUERY
+    // --------------------------------------------------------
 
-    const [tasks, total] =
-      await Promise.all([
-        populateTask(
-          Task.find(filter)
-            .sort(
-              getSortOption(sort)
-            )
-            .skip(skip)
-            .limit(limitNum)
-        ),
+    const [
+      tasks,
+      total,
+    ] = await Promise.all([
+      populateTask(
+        Task.find(filter)
+          .sort(
+            getSortOption(sort)
+          )
+          .skip(skip)
+          .limit(limitNum)
+      ),
 
-        Task.countDocuments(filter)
-      ]);
+      Task.countDocuments(
+        filter
+      ),
+    ]);
 
     const formattedTasks =
       tasks.map(safeTask);
 
     return res.status(200).json({
       success: true,
-      tasks: formattedTasks,
-      data: formattedTasks,
+
+      tasks:
+        formattedTasks,
+
+      data:
+        formattedTasks,
+
       pagination: {
-        page: pageNum,
-        limit: limitNum,
+        page:
+          pageNum,
+
+        limit:
+          limitNum,
+
         total,
+
         pages:
           Math.ceil(
-            total / limitNum
-          )
-      }
+            total /
+              limitNum
+          ),
+      },
     });
   } catch (error) {
     console.error(
-      'getAllTasks error:',
+      "getAllTasks error:",
       error
     );
 
     return res.status(500).json({
       success: false,
       message:
-        'Server error retrieving tasks.'
+        "Server error retrieving tasks.",
+      error:
+        process.env.NODE_ENV ===
+        "development"
+          ? error.message
+          : undefined,
     });
   }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================
 // GET TASK STATS
 // GET /api/tasks/stats
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================
 
-const getTaskStats = async (req, res) => {
+const getTaskStats = async (
+  req,
+  res
+) => {
   try {
     const filter = {};
 
-    if (!isAdminOrManager(req.user)) {
+    if (
+      !isAdminOrManager(
+        req.user
+      )
+    ) {
       filter.$or = [
         {
-          assignedTo: req.user._id
+          assignedTo:
+            req.user._id,
         },
         {
-          createdBy: req.user._id
-        }
+          createdBy:
+            req.user._id,
+        },
       ];
     }
 
@@ -741,85 +1347,98 @@ const getTaskStats = async (req, res) => {
       overdue,
       byPriority,
       byStatus,
-      byAssignedUser
+      byAssignedUser,
     ] = await Promise.all([
-      Task.countDocuments(filter),
+      Task.countDocuments(
+        filter
+      ),
 
       Task.countDocuments({
         ...filter,
-        status: 'Pending'
+        status: "Pending",
       }),
 
       Task.countDocuments({
         ...filter,
-        status: 'In Progress'
+        status: "In Progress",
       }),
 
       Task.countDocuments({
         ...filter,
-        status: 'Completed'
+        status: "Completed",
       }),
 
       Task.countDocuments({
         ...filter,
-        status: 'Cancelled'
+        status: "Cancelled",
       }),
 
       Task.countDocuments({
         ...filter,
+
         dueDate: {
           $lt: now,
-          $ne: null
+          $ne: null,
         },
+
         status: {
           $nin: [
-            'Completed',
-            'Cancelled'
-          ]
-        }
+            "Completed",
+            "Cancelled",
+          ],
+        },
       }),
 
       Task.aggregate([
         {
-          $match: filter
+          $match:
+            filter,
         },
         {
           $group: {
-            _id: '$priority',
+            _id:
+              "$priority",
+
             count: {
-              $sum: 1
-            }
-          }
-        }
+              $sum: 1,
+            },
+          },
+        },
       ]),
 
       Task.aggregate([
         {
-          $match: filter
+          $match:
+            filter,
         },
         {
           $group: {
-            _id: '$status',
+            _id:
+              "$status",
+
             count: {
-              $sum: 1
-            }
-          }
-        }
+              $sum: 1,
+            },
+          },
+        },
       ]),
 
       Task.aggregate([
         {
-          $match: filter
+          $match:
+            filter,
         },
         {
           $group: {
-            _id: '$assignedTo',
+            _id:
+              "$assignedTo",
+
             count: {
-              $sum: 1
-            }
-          }
-        }
-      ])
+              $sum: 1,
+            },
+          },
+        },
+      ]),
     ]);
 
     const stats = {
@@ -831,232 +1450,287 @@ const getTaskStats = async (req, res) => {
       overdue,
       byPriority,
       byStatus,
-      byAssignedUser
+      byAssignedUser,
     };
 
     return res.status(200).json({
       success: true,
       stats,
-      data: stats
+      data: stats,
     });
   } catch (error) {
     console.error(
-      'getTaskStats error:',
+      "getTaskStats error:",
       error
     );
 
     return res.status(500).json({
       success: false,
       message:
-        'Server error retrieving task stats.'
+        "Server error retrieving task stats.",
     });
   }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================
 // GET MY TASKS
 // GET /api/tasks/my
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================
 
-const getMyTasks = async (req, res) => {
+const getMyTasks = async (
+  req,
+  res
+) => {
   try {
     const {
       page = 1,
       limit = 20,
       status,
       priority,
-      sort = '-createdAt',
-      search
+      sort = "-createdAt",
+      search,
     } = req.query;
 
-    const userFilter = {
+    const ownershipCondition = {
       $or: [
         {
-          assignedTo: req.user._id
+          assignedTo:
+            req.user._id,
         },
         {
-          createdBy: req.user._id
-        }
+          createdBy:
+            req.user._id,
+        },
       ]
     };
 
     const filter = {
-      ...userFilter
+      ...ownershipCondition,
     };
 
+    // --------------------------------------------------------
+    // STATUS
+    // --------------------------------------------------------
+
     if (status) {
-      if (!VALID_STATUSES.includes(status)) {
+      if (
+        !VALID_STATUSES.includes(
+          status
+        )
+      ) {
         return res.status(400).json({
           success: false,
           message:
-            `Invalid status filter. Allowed: ${VALID_STATUSES.join(', ')}.`
+            `Invalid status filter. Allowed: ${VALID_STATUSES.join(
+              ", "
+            )}.`,
         });
       }
 
-      filter.status = status;
+      filter.status =
+        status;
     }
+
+    // --------------------------------------------------------
+    // PRIORITY
+    // --------------------------------------------------------
 
     if (priority) {
-      if (!VALID_PRIORITIES.includes(priority)) {
+      if (
+        !VALID_PRIORITIES.includes(
+          priority
+        )
+      ) {
         return res.status(400).json({
           success: false,
           message:
-            `Invalid priority filter. Allowed: ${VALID_PRIORITIES.join(', ')}.`
+            `Invalid priority filter. Allowed: ${VALID_PRIORITIES.join(
+              ", "
+            )}.`,
         });
       }
 
-      filter.priority = priority;
+      filter.priority =
+        priority;
     }
+
+    // --------------------------------------------------------
+    // SEARCH
+    // --------------------------------------------------------
 
     if (
       search &&
       String(search).trim()
     ) {
-      const regex = new RegExp(
-        String(search).trim(),
-        'i'
-      );
+      const regex =
+        new RegExp(
+          escapeRegex(
+            String(search).trim()
+          ),
+          "i"
+        );
 
       filter.$and = [
-        userFilter,
+        ownershipCondition,
         {
           $or: [
             {
-              title: regex
+              title: regex,
             },
             {
-              description: regex
+              description:
+                regex,
             },
             {
-              category: regex
-            }
-          ]
-        }
+              category:
+                regex,
+            },
+          ],
+        },
       ];
 
       delete filter.$or;
     }
 
-    const pageNum =
-      Math.max(
-        1,
-        parseInt(page) || 1
-      );
+    // --------------------------------------------------------
+    // PAGINATION
+    // --------------------------------------------------------
 
-    const limitNum =
-      Math.min(
-        100,
-        Math.max(
-          1,
-          parseInt(limit) || 20
-        )
-      );
+    const {
+      pageNum,
+      limitNum,
+      skip,
+    } = getPagination(
+      page,
+      limit
+    );
 
-    const skip =
-      (pageNum - 1) *
-      limitNum;
+    const [
+      tasks,
+      total,
+    ] = await Promise.all([
+      populateTask(
+        Task.find(filter)
+          .sort(
+            getSortOption(sort)
+          )
+          .skip(skip)
+          .limit(limitNum)
+      ),
 
-    const [tasks, total] =
-      await Promise.all([
-        populateTask(
-          Task.find(filter)
-            .sort(
-              getSortOption(sort)
-            )
-            .skip(skip)
-            .limit(limitNum)
-        ),
-
-        Task.countDocuments(filter)
-      ]);
+      Task.countDocuments(
+        filter
+      ),
+    ]);
 
     const formattedTasks =
       tasks.map(safeTask);
 
     return res.status(200).json({
       success: true,
-      tasks: formattedTasks,
-      data: formattedTasks,
+
+      tasks:
+        formattedTasks,
+
+      data:
+        formattedTasks,
+
       pagination: {
-        page: pageNum,
-        limit: limitNum,
+        page:
+          pageNum,
+
+        limit:
+          limitNum,
+
         total,
+
         pages:
           Math.ceil(
-            total / limitNum
-          )
-      }
+            total /
+              limitNum
+          ),
+      },
     });
   } catch (error) {
     console.error(
-      'getMyTasks error:',
+      "getMyTasks error:",
       error
     );
 
     return res.status(500).json({
       success: false,
       message:
-        'Server error retrieving your tasks.'
+        "Server error retrieving your tasks.",
     });
   }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================
 // GET TASK BY ID
 // GET /api/tasks/:id
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================
 
-const getTaskById = async (req, res) => {
+const getTaskById = async (
+  req,
+  res
+) => {
   try {
+    const { id } =
+      req.params;
+
     if (
-      !isValidObjectId(
-        req.params.id
-      )
+      !isValidObjectId(id)
     ) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid task ID.'
+        message:
+          "Invalid task ID.",
       });
     }
 
     const task =
       await populateTask(
-        Task.findById(
-          req.params.id
-        )
+        Task.findById(id)
       );
 
     if (!task) {
       return res.status(404).json({
         success: false,
-        message: 'Task not found.'
+        message:
+          "Task not found.",
       });
     }
 
     const currentUserId =
-      req.user._id.toString();
+      req.user._id;
 
     const isAssigned =
       task.assignedTo &&
-      task.assignedTo._id &&
-      task.assignedTo._id.toString() ===
-        currentUserId;
+      sameId(
+        task.assignedTo._id ||
+          task.assignedTo,
+        currentUserId
+      );
 
     const isCreator =
       task.createdBy &&
-      task.createdBy._id &&
-      task.createdBy._id.toString() ===
-        currentUserId;
+      sameId(
+        task.createdBy._id ||
+          task.createdBy,
+        currentUserId
+      );
 
     if (
-      !isAdminOrManager(req.user) &&
+      !isAdminOrManager(
+        req.user
+      ) &&
       !isAssigned &&
       !isCreator
     ) {
       return res.status(403).json({
         success: false,
         message:
-          'Access denied. You can only view tasks assigned to or created by you.'
+          "Access denied. You can only view tasks assigned to or created by you.",
       });
     }
 
@@ -1065,68 +1739,78 @@ const getTaskById = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      task: formattedTask,
-      data: formattedTask
+
+      task:
+        formattedTask,
+
+      data:
+        formattedTask,
     });
   } catch (error) {
     console.error(
-      'getTaskById error:',
+      "getTaskById error:",
       error
     );
 
     return res.status(500).json({
       success: false,
       message:
-        'Server error retrieving task.'
+        "Server error retrieving task.",
     });
   }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================
 // UPDATE TASK
 // PUT/PATCH /api/tasks/:id
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================
 
-const updateTask = async (req, res) => {
+const updateTask = async (
+  req,
+  res
+) => {
   try {
+    const { id } =
+      req.params;
+
     if (
-      !isValidObjectId(
-        req.params.id
-      )
+      !isValidObjectId(id)
     ) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid task ID.'
+        message:
+          "Invalid task ID.",
       });
     }
 
     const task =
-      await Task.findById(
-        req.params.id
-      );
+      await Task.findById(id);
 
     if (!task) {
       return res.status(404).json({
         success: false,
-        message: 'Task not found.'
+        message:
+          "Task not found.",
       });
     }
 
     const currentUser =
       await User.findById(
         req.user._id
-      ).select('name role');
+      ).select(
+        "name email role"
+      );
 
     if (!currentUser) {
       return res.status(401).json({
         success: false,
         message:
-          'Authenticated user no longer exists.'
+          "Authenticated user no longer exists.",
       });
     }
 
     const currentUserId =
-      currentUser._id.toString();
+      currentUser._id;
 
     const adminOrManager =
       isAdminOrManager(
@@ -1135,13 +1819,21 @@ const updateTask = async (req, res) => {
 
     const isAssignedUser =
       task.assignedTo &&
-      task.assignedTo.toString() ===
-        currentUserId;
+      sameId(
+        task.assignedTo,
+        currentUserId
+      );
 
     const isCreatorUser =
       task.createdBy &&
-      task.createdBy.toString() ===
-        currentUserId;
+      sameId(
+        task.createdBy,
+        currentUserId
+      );
+
+    // --------------------------------------------------------
+    // ACCESS
+    // --------------------------------------------------------
 
     if (
       !adminOrManager &&
@@ -1151,7 +1843,7 @@ const updateTask = async (req, res) => {
       return res.status(403).json({
         success: false,
         message:
-          'Access denied. You can only update tasks assigned to or created by you.'
+          "Access denied. You can only update tasks assigned to or created by you.",
       });
     }
 
@@ -1165,15 +1857,14 @@ const updateTask = async (req, res) => {
       status,
       dueDate,
       category,
-      attachments
     } = req.body;
 
     task.activity =
       task.activity || [];
 
-    // ─────────────────────────────────────
+    // ========================================================
     // NORMAL USER
-    // ─────────────────────────────────────
+    // ========================================================
 
     if (!adminOrManager) {
       const hasRestrictedFields =
@@ -1185,13 +1876,17 @@ const updateTask = async (req, res) => {
         priority !== undefined ||
         dueDate !== undefined ||
         category !== undefined ||
-        attachments !== undefined;
+        req.body?.attachments !==
+          undefined ||
+        getUploadedAttachments(
+          req
+        ).length > 0;
 
       if (hasRestrictedFields) {
         return res.status(403).json({
           success: false,
           message:
-            'Access denied. You can only update the status of your assigned tasks.'
+            "Access denied. You can only update the status of your assigned tasks.",
         });
       }
 
@@ -1199,24 +1894,29 @@ const updateTask = async (req, res) => {
         return res.status(403).json({
           success: false,
           message:
-            'Access denied. You can only update tasks assigned to you.'
+            "Access denied. You can only update tasks assigned to you.",
         });
       }
 
       if (
-        !status ||
-        !VALID_STATUSES.includes(status)
+        status === undefined ||
+        !VALID_STATUSES.includes(
+          status
+        )
       ) {
         return res.status(400).json({
           success: false,
           message:
-            `Invalid status. Allowed: ${VALID_STATUSES.join(', ')}.`
+            `Invalid status. Allowed: ${VALID_STATUSES.join(
+              ", "
+            )}.`,
         });
       }
 
       const previousStatus =
         task.status;
 
+      // Same status
       if (
         status === previousStatus
       ) {
@@ -1228,111 +1928,146 @@ const updateTask = async (req, res) => {
           );
 
         const formattedTask =
-          safeTask(populated);
+          safeTask(
+            populated
+          );
 
         return res.status(200).json({
           success: true,
+
           message:
-            'Task status is already set to this value.',
-          task: formattedTask,
-          data: formattedTask
+            "Task status is already set to this value.",
+
+          task:
+            formattedTask,
+
+          data:
+            formattedTask,
         });
       }
 
       const allowedTransitions = {
         Pending: [
-          'In Progress',
-          'Completed',
-          'Cancelled'
+          "In Progress",
+          "Completed",
+          "Cancelled",
         ],
 
-        'In Progress': [
-          'Pending',
-          'Completed',
-          'Cancelled'
+        "In Progress": [
+          "Pending",
+          "Completed",
+          "Cancelled",
         ],
 
         Completed: [
-          'In Progress'
+          "In Progress",
         ],
 
         Cancelled: [
-          'In Progress'
-        ]
+          "In Progress",
+        ],
       };
 
       const allowedNextStatuses =
-        allowedTransitions[previousStatus] || [];
+        allowedTransitions[
+          previousStatus
+        ] || [];
 
       if (
-        !allowedNextStatuses.includes(status)
+        !allowedNextStatuses.includes(
+          status
+        )
       ) {
         return res.status(400).json({
           success: false,
           message:
-            `Invalid status transition from ${previousStatus} to ${status}.`
+            `Invalid status transition from ${previousStatus} to ${status}.`,
         });
       }
 
-      task.status = status;
+      task.status =
+        status;
 
       task.activity.push({
-        user: currentUserId,
-        action: 'status_changed',
+        user:
+          currentUserId,
+
+        action:
+          "status_changed",
+
         details:
           `Status changed from ${previousStatus} to ${status}`,
-        timestamp: new Date()
+
+        timestamp:
+          new Date(),
       });
 
       if (
-        status === 'Completed'
+        status === "Completed"
       ) {
         task.completedAt =
           new Date();
       } else if (
-        previousStatus === 'Completed'
+        previousStatus ===
+        "Completed"
       ) {
-        task.completedAt = null;
+        task.completedAt =
+          null;
       }
 
       await task.save();
 
-      // Notify creator when assigned user completes task
+      // ------------------------------------------------------
+      // NOTIFY CREATOR
+      // ------------------------------------------------------
+
       if (
-        status === 'Completed' &&
+        status ===
+          "Completed" &&
         task.createdBy &&
-        task.createdBy.toString() !==
+        !sameId(
+          task.createdBy,
           currentUserId
+        )
       ) {
         try {
           await createNotification({
             userId:
               task.createdBy,
+
             type:
-              'task',
+              "task",
+
             title:
-              'Task Completed',
+              "Task Completed",
+
             message:
               `The task "${task.title}" has been completed.`,
+
             relatedId:
               task._id,
+
             relatedType:
-              'Task',
+              "Task",
+
             actionUrl:
-              '/dashboard/tasks',
+              "/dashboard/tasks",
+
             metadata: {
               taskId:
                 task._id,
+
               title:
                 task.title,
+
               completedBy:
-                currentUser._id
-            }
+                currentUserId,
+            },
           });
-        } catch (notifErr) {
+        } catch (notificationError) {
           console.error(
-            'Notification error in status update:',
-            notifErr
+            "Notification error in status update:",
+            notificationError
           );
         }
       }
@@ -1345,101 +2080,193 @@ const updateTask = async (req, res) => {
         );
 
       const formattedTask =
-        safeTask(populated);
+        safeTask(
+          populated
+        );
 
       return res.status(200).json({
         success: true,
+
         message:
-          'Task status updated successfully.',
-        task: formattedTask,
-        data: formattedTask
+          "Task status updated successfully.",
+
+        task:
+          formattedTask,
+
+        data:
+          formattedTask,
       });
     }
 
-    // ─────────────────────────────────────
-    // ADMIN / MANAGER
-    // ─────────────────────────────────────
+    // ========================================================
+    // ADMIN / MANAGER UPDATE
+    // ========================================================
 
+    // --------------------------------------------------------
     // TITLE
-    if (title !== undefined) {
-      if (
-        !title ||
-        !String(title).trim()
-      ) {
+    // --------------------------------------------------------
+
+    if (
+      title !== undefined
+    ) {
+      const cleanTitle =
+        String(title).trim();
+
+      if (!cleanTitle) {
         return res.status(400).json({
           success: false,
           message:
-            'Task title cannot be empty.'
+            "Task title cannot be empty.",
         });
       }
 
       if (
-        String(title).trim().length < 3
+        cleanTitle.length < 3
       ) {
         return res.status(400).json({
           success: false,
           message:
-            'Title must be at least 3 characters long.'
+            "Title must be at least 3 characters long.",
         });
       }
 
       task.title =
-        String(title).trim();
+        cleanTitle;
     }
 
+    // --------------------------------------------------------
     // DESCRIPTION
-    if (description !== undefined) {
+    // --------------------------------------------------------
+
+    if (
+      description !==
+      undefined
+    ) {
       task.description =
         description
           ? String(
               description
             ).trim()
-          : '';
+          : "";
     }
 
+    // --------------------------------------------------------
     // CATEGORY
-    if (category !== undefined) {
+    // --------------------------------------------------------
+
+    if (
+      category !== undefined
+    ) {
       task.category =
         category
-          ? String(category).trim()
-          : 'General';
+          ? String(
+              category
+            ).trim()
+          : "General";
     }
 
+    // --------------------------------------------------------
     // ATTACHMENTS
+    // --------------------------------------------------------
+
+    const bodyAttachments =
+      parseBodyAttachments(
+        req.body?.attachments,
+        currentUserId
+      );
+
+    const uploadedAttachments =
+      getUploadedAttachments(
+        req
+      );
+
+    /*
+      Attachment behaviour:
+
+      1. No attachments field + no uploaded files
+         => Keep existing attachments.
+
+      2. attachments field exists
+         => Replace existing attachments
+            with supplied attachments.
+
+      3. New uploaded files
+         => Append uploaded files.
+    */
+
     if (
-      attachments !== undefined
+      bodyAttachments !==
+        null ||
+      uploadedAttachments.length >
+        0
     ) {
+      const existingAttachments =
+        bodyAttachments !==
+        null
+          ? bodyAttachments
+          : Array.isArray(
+              task.attachments
+            )
+            ? task.attachments
+            : [];
+
+      task.attachments = [
+        ...existingAttachments,
+        ...uploadedAttachments,
+      ];
+
       if (
-        !Array.isArray(
-          attachments
-        )
+        uploadedAttachments.length >
+        0
       ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            'Attachments must be an array.'
+        task.activity.push({
+          user:
+            currentUserId,
+
+          action:
+            "attachment_added",
+
+          details:
+            `Added ${uploadedAttachments.length} attachment(s)`,
+
+          timestamp:
+            new Date(),
         });
       }
-
-      task.attachments =
-        attachments;
     }
 
+    // --------------------------------------------------------
     // CONTACT
-    const targetContact =
-      contact !== undefined
-        ? contact
-        : contactId;
+    // --------------------------------------------------------
+
+    let targetContact;
 
     if (
-      targetContact !== undefined
+      contact !== undefined
+    ) {
+      targetContact =
+        contact;
+    } else if (
+      contactId !== undefined
+    ) {
+      targetContact =
+        contactId;
+    }
+
+    if (
+      targetContact !==
+      undefined
     ) {
       if (
-        targetContact === null ||
-        targetContact === ''
+        targetContact ===
+          null ||
+        targetContact === ""
       ) {
-        task.contact = null;
-        task.contactId = null;
+        task.contact =
+          null;
+
+        task.contactId =
+          null;
       } else {
         if (
           !isValidObjectId(
@@ -1449,7 +2276,7 @@ const updateTask = async (req, res) => {
           return res.status(400).json({
             success: false,
             message:
-              'Invalid contact ID.'
+              "Invalid contact ID.",
           });
         }
 
@@ -1461,11 +2288,16 @@ const updateTask = async (req, res) => {
       }
     }
 
-    // REASSIGNMENT
-    let isReassigned = false;
+    // --------------------------------------------------------
+    // REASSIGN
+    // --------------------------------------------------------
+
+    let isReassigned =
+      false;
 
     if (
-      assignedTo !== undefined
+      assignedTo !==
+      undefined
     ) {
       if (
         !assignedTo ||
@@ -1476,52 +2308,68 @@ const updateTask = async (req, res) => {
         return res.status(400).json({
           success: false,
           message:
-            'Invalid assigned user ID.'
+            "Invalid assigned user ID.",
         });
       }
 
       const newAssignee =
         await User.findById(
           assignedTo
+        ).select(
+          "name email role status"
         );
 
       if (!newAssignee) {
         return res.status(404).json({
           success: false,
           message:
-            'Assigned user not found.'
+            "Assigned user not found.",
         });
       }
 
       const previousAssignee =
         task.assignedTo
-          ? task.assignedTo.toString()
+          ? String(
+              task.assignedTo
+            )
           : null;
 
       if (
         previousAssignee !==
-        assignedTo.toString()
+        String(
+          newAssignee._id
+        )
       ) {
         task.assignedTo =
           newAssignee._id;
 
-        isReassigned = true;
+        isReassigned =
+          true;
 
         task.activity.push({
           user:
-            currentUser._id,
+            currentUserId,
+
           action:
-            'reassigned',
+            "reassigned",
+
           details:
-            `Reassigned to ${newAssignee.name}`,
+            `Reassigned to ${newAssignee.name || "user"}`,
+
           timestamp:
-            new Date()
+            new Date(),
         });
       }
     }
 
+    // --------------------------------------------------------
     // PRIORITY
-    if (priority !== undefined) {
+    // --------------------------------------------------------
+
+    if (
+      priority !==
+      undefined
+    ) {
       if (
         !VALID_PRIORITIES.includes(
           priority
@@ -1530,7 +2378,9 @@ const updateTask = async (req, res) => {
         return res.status(400).json({
           success: false,
           message:
-            `Invalid priority. Allowed: ${VALID_PRIORITIES.join(', ')}.`
+            `Invalid priority. Allowed: ${VALID_PRIORITIES.join(
+              ", "
+            )}.`,
         });
       }
 
@@ -1540,13 +2390,16 @@ const updateTask = async (req, res) => {
       ) {
         task.activity.push({
           user:
-            currentUser._id,
+            currentUserId,
+
           action:
-            'priority_changed',
+            "priority_changed",
+
           details:
             `Priority changed from ${task.priority} to ${priority}`,
+
           timestamp:
-            new Date()
+            new Date(),
         });
 
         task.priority =
@@ -1554,13 +2407,19 @@ const updateTask = async (req, res) => {
       }
     }
 
+    // --------------------------------------------------------
     // STATUS
+    // --------------------------------------------------------
+
     const previousStatus =
       task.status;
 
-    let statusChanged = false;
+    let statusChanged =
+      false;
 
-    if (status !== undefined) {
+    if (
+      status !== undefined
+    ) {
       if (
         !VALID_STATUSES.includes(
           status
@@ -1569,36 +2428,45 @@ const updateTask = async (req, res) => {
         return res.status(400).json({
           success: false,
           message:
-            `Invalid status. Allowed: ${VALID_STATUSES.join(', ')}.`
+            `Invalid status. Allowed: ${VALID_STATUSES.join(
+              ", "
+            )}.`,
         });
       }
 
       if (
-        status !== previousStatus
+        status !==
+        previousStatus
       ) {
         task.status =
           status;
 
-        statusChanged = true;
+        statusChanged =
+          true;
 
         task.activity.push({
           user:
-            currentUser._id,
+            currentUserId,
+
           action:
-            'status_changed',
+            "status_changed",
+
           details:
             `Status changed from ${previousStatus} to ${status}`,
+
           timestamp:
-            new Date()
+            new Date(),
         });
 
         if (
-          status === 'Completed'
+          status ===
+          "Completed"
         ) {
           task.completedAt =
             new Date();
         } else if (
-          previousStatus === 'Completed'
+          previousStatus ===
+          "Completed"
         ) {
           task.completedAt =
             null;
@@ -1606,28 +2474,35 @@ const updateTask = async (req, res) => {
       }
     }
 
+    // --------------------------------------------------------
     // DUE DATE
+    // --------------------------------------------------------
+
     if (
-      dueDate !== undefined
+      dueDate !==
+      undefined
     ) {
       if (
         dueDate === null ||
-        dueDate === ''
+        dueDate === ""
       ) {
-        task.dueDate = null;
+        task.dueDate =
+          null;
       } else {
         const parsedDate =
-          new Date(dueDate);
+          new Date(
+            dueDate
+          );
 
         if (
-          isNaN(
+          Number.isNaN(
             parsedDate.getTime()
           )
         ) {
           return res.status(400).json({
             success: false,
             message:
-              'Invalid due date.'
+              "Invalid due date.",
           });
         }
 
@@ -1636,28 +2511,38 @@ const updateTask = async (req, res) => {
       }
     }
 
+    // --------------------------------------------------------
+    // SAVE
+    // --------------------------------------------------------
+
     await task.save();
 
-    // ─────────────────────────────────────
+    // ========================================================
     // NOTIFICATIONS
-    // ─────────────────────────────────────
+    // ========================================================
 
     try {
+      // ------------------------------------------------------
+      // REASSIGNED
+      // ------------------------------------------------------
+
       if (
         isReassigned &&
         task.assignedTo &&
-        task.assignedTo.toString() !==
+        !sameId(
+          task.assignedTo,
           currentUserId
+        )
       ) {
         await createNotification({
           userId:
             task.assignedTo,
 
           type:
-            'task',
+            "task",
 
           title:
-            'New Task Assigned',
+            "New Task Assigned",
 
           message:
             `A task "${task.title}" has been assigned to you.`,
@@ -1666,10 +2551,10 @@ const updateTask = async (req, res) => {
             task._id,
 
           relatedType:
-            'Task',
+            "Task",
 
           actionUrl:
-            '/dashboard/tasks',
+            "/dashboard/tasks",
 
           metadata: {
             taskId:
@@ -1679,30 +2564,37 @@ const updateTask = async (req, res) => {
               task.title,
 
             reassigned:
-              true
-          }
+              true,
+          },
         });
       }
+
+      // ------------------------------------------------------
+      // STATUS CHANGED
+      // ------------------------------------------------------
 
       if (
         statusChanged
       ) {
+        // Completed
         if (
           task.status ===
-            'Completed' &&
+            "Completed" &&
           task.createdBy &&
-          task.createdBy.toString() !==
+          !sameId(
+            task.createdBy,
             currentUserId
+          )
         ) {
           await createNotification({
             userId:
               task.createdBy,
 
             type:
-              'task',
+              "task",
 
             title:
-              'Task Completed',
+              "Task Completed",
 
             message:
               `The task "${task.title}" has been completed.`,
@@ -1711,10 +2603,10 @@ const updateTask = async (req, res) => {
               task._id,
 
             relatedType:
-              'Task',
+              "Task",
 
             actionUrl:
-              '/dashboard/tasks',
+              "/dashboard/tasks",
 
             metadata: {
               taskId:
@@ -1724,23 +2616,28 @@ const updateTask = async (req, res) => {
                 task.title,
 
               completedBy:
-                currentUser._id
-            }
+                currentUserId,
+            },
           });
-        } else if (
+        }
+
+        // Other status updates
+        else if (
           task.assignedTo &&
-          task.assignedTo.toString() !==
+          !sameId(
+            task.assignedTo,
             currentUserId
+          )
         ) {
           await createNotification({
             userId:
               task.assignedTo,
 
             type:
-              'task',
+              "task",
 
             title:
-              'Task Status Updated',
+              "Task Status Updated",
 
             message:
               `The status of task "${task.title}" was updated to ${task.status}.`,
@@ -1749,10 +2646,10 @@ const updateTask = async (req, res) => {
               task._id,
 
             relatedType:
-              'Task',
+              "Task",
 
             actionUrl:
-              '/dashboard/tasks',
+              "/dashboard/tasks",
 
             metadata: {
               taskId:
@@ -1762,17 +2659,21 @@ const updateTask = async (req, res) => {
                 task.title,
 
               status:
-                task.status
-            }
+                task.status,
+            },
           });
         }
       }
-    } catch (notifErr) {
+    } catch (notificationError) {
       console.error(
-        'Notification error in updateTask:',
-        notifErr
+        "Notification error in updateTask:",
+        notificationError
       );
     }
+
+    // --------------------------------------------------------
+    // RESPONSE
+    // --------------------------------------------------------
 
     const populated =
       await populateTask(
@@ -1782,432 +2683,62 @@ const updateTask = async (req, res) => {
       );
 
     const formattedTask =
-      safeTask(populated);
+      safeTask(
+        populated
+      );
 
     return res.status(200).json({
       success: true,
+
       message:
-        'Task updated successfully.',
-      task: formattedTask,
-      data: formattedTask
+        "Task updated successfully.",
+
+      task:
+        formattedTask,
+
+      data:
+        formattedTask,
     });
   } catch (error) {
     console.error(
-      'updateTask error:',
+      "updateTask error:",
       error
     );
 
     return res.status(500).json({
       success: false,
       message:
-        'Server error updating task.'
+        "Server error updating task.",
+
+      error:
+        process.env.NODE_ENV ===
+        "development"
+          ? error.message
+          : undefined,
     });
   }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================
 // DELETE TASK
 // DELETE /api/tasks/:id
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================
 
-const deleteTask = async (req, res) => {
-  try {
-    if (
-      !isValidObjectId(
-        req.params.id
-      )
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid task ID.'
-      });
-    }
-
-    const task =
-      await Task.findById(
-        req.params.id
-      );
-
-    if (!task) {
-      return res.status(404).json({
-        success: false,
-        message: 'Task not found.'
-      });
-    }
-
-    const currentUserId =
-      req.user._id.toString();
-
-    const isAssignedUser =
-      task.assignedTo &&
-      task.assignedTo.toString() ===
-        currentUserId;
-
-    const isCreatorUser =
-      task.createdBy &&
-      task.createdBy.toString() ===
-        currentUserId;
-
-    if (
-      !isAdminOrManager(req.user) &&
-      !isAssignedUser &&
-      !isCreatorUser
-    ) {
-      return res.status(403).json({
-        success: false,
-        message:
-          'Access denied. You can only delete tasks assigned to or created by you.'
-      });
-    }
-
-    await Task.findByIdAndDelete(
-      req.params.id
-    );
-
-    return res.status(200).json({
-      success: true,
-      message:
-        'Task deleted successfully.'
-    });
-  } catch (error) {
-    console.error(
-      'deleteTask error:',
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message:
-        'Server error deleting task.'
-    });
-  }
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ADD COMMENT
-// POST /api/tasks/:id/comments
-// ─────────────────────────────────────────────────────────────────────────────
-
-const addComment = async (req, res) => {
-  try {
-    if (
-      !isValidObjectId(
-        req.params.id
-      )
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid task ID.'
-      });
-    }
-
-    const {
-      text,
-      comment
-    } = req.body;
-
-    const commentText =
-      text || comment;
-
-    if (
-      !commentText ||
-      !String(commentText).trim()
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          'Comment text is required.'
-      });
-    }
-
-    const task =
-      await Task.findById(
-        req.params.id
-      );
-
-    if (!task) {
-      return res.status(404).json({
-        success: false,
-        message: 'Task not found.'
-      });
-    }
-
-    const isAllowed =
-      isAdminOrManager(
-        req.user
-      ) ||
-      (
-        task.assignedTo &&
-        task.assignedTo.toString() ===
-          req.user._id.toString()
-      ) ||
-      (
-        task.createdBy &&
-        task.createdBy.toString() ===
-          req.user._id.toString()
-      );
-
-    if (!isAllowed) {
-      return res.status(403).json({
-        success: false,
-        message:
-          'Access denied. You can only comment on tasks assigned to or created by you.'
-      });
-    }
-
-    task.comments =
-      task.comments || [];
-
-    task.activity =
-      task.activity || [];
-
-    const trimmedComment =
-      String(
-        commentText
-      ).trim();
-
-    const newComment = {
-      user:
-        req.user._id,
-      text:
-        trimmedComment,
-      createdAt:
-        new Date()
-    };
-
-    task.comments.push(
-      newComment
-    );
-
-    task.activity.push({
-      user:
-        req.user._id,
-      action:
-        'comment_added',
-      details:
-        `Added a comment: "${trimmedComment.substring(0, 50)}${trimmedComment.length > 50 ? '...' : ''}"`,
-      timestamp:
-        new Date()
-    });
-
-    await task.save();
-
-    const notifyTarget =
-      task.assignedTo &&
-      task.assignedTo.toString() ===
-        req.user._id.toString()
-        ? task.createdBy
-        : task.assignedTo;
-
-    if (
-      notifyTarget &&
-      notifyTarget.toString() !==
-        req.user._id.toString()
-    ) {
-      try {
-        await createNotification({
-          userId:
-            notifyTarget,
-
-          type:
-            'task',
-
-          title:
-            'New Comment on Task',
-
-          message:
-            `${req.user.name || 'A user'} commented on "${task.title}".`,
-
-          relatedId:
-            task._id,
-
-          relatedType:
-            'Task',
-
-          actionUrl:
-            '/dashboard/tasks',
-
-          metadata: {
-            taskId:
-              task._id,
-
-            title:
-              task.title
-          }
-        });
-      } catch (notifErr) {
-        console.error(
-          'Comment notification error:',
-          notifErr
-        );
-      }
-    }
-
-    const populated =
-      await populateTask(
-        Task.findById(
-          task._id
-        )
-      );
-
-    const formattedTask =
-      safeTask(populated);
-
-    return res.status(201).json({
-      success: true,
-      message:
-        'Comment added successfully.',
-      comments:
-        formattedTask.comments,
-      data:
-        formattedTask
-    });
-  } catch (error) {
-    console.error(
-      'addComment error:',
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message:
-        'Server error adding comment.'
-    });
-  }
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// GET COMMENTS
-// GET /api/tasks/:id/comments
-// ─────────────────────────────────────────────────────────────────────────────
-
-const getComments = async (req, res) => {
-  try {
-    if (
-      !isValidObjectId(
-        req.params.id
-      )
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid task ID.'
-      });
-    }
-
-    const task =
-      await Task.findById(
-        req.params.id
-      )
-        .populate(
-          'comments.user',
-          'name email role avatar'
-        )
-        .populate(
-          'assignedTo',
-          'name email role'
-        )
-        .populate(
-          'createdBy',
-          'name email role'
-        );
-
-    if (!task) {
-      return res.status(404).json({
-        success: false,
-        message: 'Task not found.'
-      });
-    }
-
-    const isAllowed =
-      isAdminOrManager(
-        req.user
-      ) ||
-      (
-        task.assignedTo &&
-        task.assignedTo._id &&
-        task.assignedTo._id.toString() ===
-          req.user._id.toString()
-      ) ||
-      (
-        task.createdBy &&
-        task.createdBy._id &&
-        task.createdBy._id.toString() ===
-          req.user._id.toString()
-      );
-
-    if (!isAllowed) {
-      return res.status(403).json({
-        success: false,
-        message:
-          'Access denied. You can only view comments for tasks assigned to or created by you.'
-      });
-    }
-
-    const comments =
-      (task.comments || []).map(
-        (comment) => ({
-          id:
-            comment._id,
-
-          _id:
-            comment._id,
-
-          user:
-            safeUserRef(
-              comment.user
-            ),
-
-          text:
-            comment.text,
-
-          createdAt:
-            comment.createdAt
-        })
-      );
-
-    return res.status(200).json({
-      success: true,
-      comments,
-      data:
-        comments
-    });
-  } catch (error) {
-    console.error(
-      'getComments error:',
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message:
-        'Server error retrieving comments.'
-    });
-  }
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// DELETE COMMENT
-// DELETE /api/tasks/:id/comments/:commentId
-// ─────────────────────────────────────────────────────────────────────────────
-
-const deleteComment = async (
+const deleteTask = async (
   req,
   res
 ) => {
   try {
-    const {
-      id,
-      commentId
-    } = req.params;
+    const { id } =
+      req.params;
 
     if (
-      !isValidObjectId(id) ||
-      !isValidObjectId(commentId)
+      !isValidObjectId(id)
     ) {
       return res.status(400).json({
         success: false,
         message:
-          'Invalid ID provided.'
+          "Invalid task ID.",
       });
     }
 
@@ -2217,9 +2748,480 @@ const deleteComment = async (
     if (!task) {
       return res.status(404).json({
         success: false,
-        message: 'Task not found.'
+        message:
+          "Task not found.",
       });
     }
+
+    const currentUserId =
+      req.user._id;
+
+    const isAssignedUser =
+      task.assignedTo &&
+      sameId(
+        task.assignedTo,
+        currentUserId
+      );
+
+    const isCreatorUser =
+      task.createdBy &&
+      sameId(
+        task.createdBy,
+        currentUserId
+      );
+
+    if (
+      !isAdminOrManager(
+        req.user
+      ) &&
+      !isAssignedUser &&
+      !isCreatorUser
+    ) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Access denied. You can only delete tasks assigned to or created by you.",
+      });
+    }
+
+    await Task.findByIdAndDelete(
+      id
+    );
+
+    return res.status(200).json({
+      success: true,
+      message:
+        "Task deleted successfully.",
+    });
+  } catch (error) {
+    console.error(
+      "deleteTask error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message:
+        "Server error deleting task.",
+    });
+  }
+};
+
+// ============================================================
+// ADD COMMENT
+// POST /api/tasks/:id/comments
+// ============================================================
+
+const addComment = async (
+  req,
+  res
+) => {
+  try {
+    const { id } =
+      req.params;
+
+    if (
+      !isValidObjectId(id)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Invalid task ID.",
+      });
+    }
+
+    const {
+      text,
+      comment,
+    } = req.body;
+
+    const commentText =
+      text !== undefined
+        ? text
+        : comment;
+
+    if (
+      !commentText ||
+      !String(
+        commentText
+      ).trim()
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Comment text is required.",
+      });
+    }
+
+    const trimmedComment =
+      String(
+        commentText
+      ).trim();
+
+    const task =
+      await Task.findById(id);
+
+    if (!task) {
+      return res.status(404).json({
+        success: false,
+        message:
+          "Task not found.",
+      });
+    }
+
+    const currentUserId =
+      req.user._id;
+
+    const isAllowed =
+      isAdminOrManager(
+        req.user
+      ) ||
+      (
+        task.assignedTo &&
+        sameId(
+          task.assignedTo,
+          currentUserId
+        )
+      ) ||
+      (
+        task.createdBy &&
+        sameId(
+          task.createdBy,
+          currentUserId
+        )
+      );
+
+    if (!isAllowed) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Access denied. You can only comment on tasks assigned to or created by you.",
+      });
+    }
+
+    task.comments =
+      task.comments || [];
+
+    task.activity =
+      task.activity || [];
+
+    // --------------------------------------------------------
+    // COMMENT
+    // --------------------------------------------------------
+
+    task.comments.push({
+      user:
+        currentUserId,
+
+      text:
+        trimmedComment,
+
+      createdAt:
+        new Date(),
+    });
+
+    const preview =
+      trimmedComment.length >
+      50
+        ? `${trimmedComment.substring(
+            0,
+            50
+          )}...`
+        : trimmedComment;
+
+    task.activity.push({
+      user:
+        currentUserId,
+
+      action:
+        "comment_added",
+
+      details:
+        `Added a comment: "${preview}"`,
+
+      timestamp:
+        new Date(),
+    });
+
+    await task.save();
+
+    // --------------------------------------------------------
+    // NOTIFICATION TARGET
+    // --------------------------------------------------------
+
+    let notifyTarget = null;
+
+    if (
+      task.assignedTo &&
+      sameId(
+        task.assignedTo,
+        currentUserId
+      )
+    ) {
+      notifyTarget =
+        task.createdBy;
+    } else {
+      notifyTarget =
+        task.assignedTo;
+    }
+
+    if (
+      notifyTarget &&
+      !sameId(
+        notifyTarget,
+        currentUserId
+      )
+    ) {
+      try {
+        await createNotification({
+          userId:
+            notifyTarget,
+
+          type:
+            "task",
+
+          title:
+            "New Comment on Task",
+
+          message:
+            `${req.user.name || "A user"} commented on "${task.title}".`,
+
+          relatedId:
+            task._id,
+
+          relatedType:
+            "Task",
+
+          actionUrl:
+            "/dashboard/tasks",
+
+          metadata: {
+            taskId:
+              task._id,
+
+            title:
+              task.title,
+          },
+        });
+      } catch (notificationError) {
+        console.error(
+          "Comment notification error:",
+          notificationError
+        );
+      }
+    }
+
+    // --------------------------------------------------------
+    // RESPONSE
+    // --------------------------------------------------------
+
+    const populated =
+      await populateTask(
+        Task.findById(
+          task._id
+        )
+      );
+
+    const formattedTask =
+      safeTask(
+        populated
+      );
+
+    return res.status(201).json({
+      success: true,
+
+      message:
+        "Comment added successfully.",
+
+      comments:
+        formattedTask.comments,
+
+      data:
+        formattedTask,
+    });
+  } catch (error) {
+    console.error(
+      "addComment error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message:
+        "Server error adding comment.",
+    });
+  }
+};
+
+// ============================================================
+// GET COMMENTS
+// GET /api/tasks/:id/comments
+// ============================================================
+
+const getComments = async (
+  req,
+  res
+) => {
+  try {
+    const { id } =
+      req.params;
+
+    if (
+      !isValidObjectId(id)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Invalid task ID.",
+      });
+    }
+
+    const task =
+      await Task.findById(id)
+        .populate(
+          "comments.user",
+          "name email role avatar"
+        )
+        .populate(
+          "assignedTo",
+          "name email role"
+        )
+        .populate(
+          "createdBy",
+          "name email role"
+        );
+
+    if (!task) {
+      return res.status(404).json({
+        success: false,
+        message:
+          "Task not found.",
+      });
+    }
+
+    const currentUserId =
+      req.user._id;
+
+    const isAllowed =
+      isAdminOrManager(
+        req.user
+      ) ||
+      (
+        task.assignedTo &&
+        sameId(
+          task.assignedTo._id ||
+            task.assignedTo,
+          currentUserId
+        )
+      ) ||
+      (
+        task.createdBy &&
+        sameId(
+          task.createdBy._id ||
+            task.createdBy,
+          currentUserId
+        )
+      );
+
+    if (!isAllowed) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Access denied. You can only view comments for tasks assigned to or created by you.",
+      });
+    }
+
+    const comments =
+      (task.comments || [])
+        .map(
+          (comment) => ({
+            id:
+              comment._id,
+
+            _id:
+              comment._id,
+
+            user:
+              safeUserRef(
+                comment.user
+              ),
+
+            text:
+              comment.text ||
+              "",
+
+            createdAt:
+              comment.createdAt,
+          })
+        );
+
+    return res.status(200).json({
+      success: true,
+
+      comments,
+
+      data:
+        comments,
+    });
+  } catch (error) {
+    console.error(
+      "getComments error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message:
+        "Server error retrieving comments.",
+    });
+  }
+};
+
+// ============================================================
+// DELETE COMMENT
+// DELETE /api/tasks/:id/comments/:commentId
+// ============================================================
+
+const deleteComment = async (
+  req,
+  res
+) => {
+  try {
+    const {
+      id,
+      commentId,
+    } = req.params;
+
+    if (
+      !isValidObjectId(id) ||
+      !isValidObjectId(
+        commentId
+      )
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Invalid ID provided.",
+      });
+    }
+
+    const task =
+      await Task.findById(id);
+
+    if (!task) {
+      return res.status(404).json({
+        success: false,
+        message:
+          "Task not found.",
+      });
+    }
+
+    const currentUserId =
+      req.user._id;
+
+    // --------------------------------------------------------
+    // TASK ACCESS
+    // --------------------------------------------------------
 
     const isTaskAllowed =
       isAdminOrManager(
@@ -2227,22 +3229,30 @@ const deleteComment = async (
       ) ||
       (
         task.assignedTo &&
-        task.assignedTo.toString() ===
-          req.user._id.toString()
+        sameId(
+          task.assignedTo,
+          currentUserId
+        )
       ) ||
       (
         task.createdBy &&
-        task.createdBy.toString() ===
-          req.user._id.toString()
+        sameId(
+          task.createdBy,
+          currentUserId
+        )
       );
 
     if (!isTaskAllowed) {
       return res.status(403).json({
         success: false,
         message:
-          'Access denied.'
+          "Access denied.",
       });
     }
+
+    // --------------------------------------------------------
+    // FIND COMMENT
+    // --------------------------------------------------------
 
     const comment =
       task.comments.id(
@@ -2253,19 +3263,25 @@ const deleteComment = async (
       return res.status(404).json({
         success: false,
         message:
-          'Comment not found.'
+          "Comment not found.",
       });
     }
 
+    // --------------------------------------------------------
+    // COMMENT PERMISSION
+    // --------------------------------------------------------
+
     const isCommentAuthor =
       comment.user &&
-      comment.user.toString() ===
-        req.user._id.toString();
+      sameId(
+        comment.user,
+        currentUserId
+      );
 
     const isAdmin =
       getUserRole(
         req.user
-      ) === 'admin';
+      ) === "admin";
 
     if (
       !isCommentAuthor &&
@@ -2274,9 +3290,13 @@ const deleteComment = async (
       return res.status(403).json({
         success: false,
         message:
-          'Access denied. You can only delete your own comments.'
+          "Access denied. You can only delete your own comments.",
       });
     }
+
+    // --------------------------------------------------------
+    // DELETE
+    // --------------------------------------------------------
 
     task.comments.pull(
       commentId
@@ -2287,39 +3307,189 @@ const deleteComment = async (
 
     task.activity.push({
       user:
-        req.user._id,
+        currentUserId,
+
       action:
-        'comment_deleted',
+        "comment_deleted",
+
       details:
-        'Deleted a comment',
+        "Deleted a comment",
+
       timestamp:
-        new Date()
+        new Date(),
     });
 
     await task.save();
 
     return res.status(200).json({
       success: true,
+
       message:
-        'Comment deleted successfully.'
+        "Comment deleted successfully.",
     });
   } catch (error) {
     console.error(
-      'deleteComment error:',
+      "deleteComment error:",
       error
     );
 
     return res.status(500).json({
       success: false,
       message:
-        'Server error deleting comment.'
+        "Server error deleting comment.",
     });
   }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================
+// REMOVE ATTACHMENT
+// DELETE /api/tasks/:id/attachments/:attachmentId
+// ============================================================
+
+const removeAttachment = async (
+  req,
+  res
+) => {
+  try {
+    const {
+      id,
+      attachmentId,
+    } = req.params;
+
+    if (
+      !isValidObjectId(id) ||
+      !isValidObjectId(attachmentId)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Invalid ID provided.",
+      });
+    }
+
+    const task =
+      await Task.findById(id);
+
+    if (!task) {
+      return res.status(404).json({
+        success: false,
+        message:
+          "Task not found.",
+      });
+    }
+
+    const currentUser =
+      await User.findById(
+        req.user._id
+      ).select(
+        "name email role"
+      );
+
+    const currentUserId =
+      currentUser._id;
+
+    const adminOrManager =
+      isAdminOrManager(
+        currentUser
+      );
+
+    const isCreatorUser =
+      task.createdBy &&
+      sameId(
+        task.createdBy,
+        currentUserId
+      );
+
+    if (
+      !adminOrManager &&
+      !isCreatorUser
+    ) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Access denied. Only managers or the task creator can remove attachments.",
+      });
+    }
+
+    const attachment =
+      task.attachments.id(
+        attachmentId
+      );
+
+    if (!attachment) {
+      return res.status(404).json({
+        success: false,
+        message:
+          "Attachment not found.",
+      });
+    }
+
+    const removedName =
+      attachment.originalName ||
+      attachment.filename ||
+      "attachment";
+
+    task.attachments.pull(
+      attachmentId
+    );
+
+    task.activity =
+      task.activity || [];
+
+    task.activity.push({
+      user:
+        currentUserId,
+
+      action:
+        "attachment_removed",
+
+      details:
+        `Removed attachment: "${removedName}"`,
+
+      timestamp:
+        new Date(),
+    });
+
+    await task.save();
+
+    const populated =
+      await populateTask(
+        Task.findById(
+          task._id
+        )
+      );
+
+    const formattedTask =
+      safeTask(
+        populated
+      );
+
+    return res.status(200).json({
+      success: true,
+      message:
+        "Attachment removed successfully.",
+      task:
+        formattedTask,
+      data:
+        formattedTask,
+    });
+  } catch (error) {
+    console.error(
+      "removeAttachment error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message:
+        "Server error removing attachment.",
+    });
+  }
+};
+
+// ============================================================
 // EXPORTS
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================
 
 module.exports = {
   createTask,
@@ -2331,5 +3501,6 @@ module.exports = {
   getTaskStats,
   addComment,
   getComments,
-  deleteComment
+  deleteComment,
+  removeAttachment,
 };

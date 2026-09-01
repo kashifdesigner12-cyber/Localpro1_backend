@@ -22,6 +22,7 @@ const fs = require("fs");
 const express = require("express");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
+const multer = require("multer");
 
 const connectDB = require("./config/db");
 
@@ -121,6 +122,10 @@ app.use(
       "Authorization",
       "Accept",
       "X-Requested-With",
+    ],
+
+    exposedHeaders: [
+      "Content-Disposition",
     ],
   })
 );
@@ -326,6 +331,21 @@ app.use((error, req, res, next) => {
 
   if (res.headersSent) {
     return next(error);
+  }
+
+  // Specific handling for Multer file upload errors
+  if (error instanceof multer.MulterError) {
+    if (error.code === "LIMIT_FILE_SIZE") {
+      return res.status(400).json({
+        success: false,
+        message: "File size exceeds the allowed limit (10MB).",
+      });
+    }
+
+    return res.status(400).json({
+      success: false,
+      message: `File upload error: ${error.message}`,
+    });
   }
 
   return res.status(500).json({

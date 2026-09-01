@@ -24,22 +24,44 @@ const safeUserRef = (u) => {
   return u;
 };
 
-// Safe message response helper
-const safeMessage = (msg) => ({
-  id: msg._id,
-  _id: msg._id,
-  conversationId: msg.conversation,
-  sender: safeUserRef(msg.sender),
-  recipient: safeUserRef(msg.recipient),
-  body: msg.body || msg.message || '',
-  message: msg.body || msg.message || '',
-  messageType: msg.messageType || 'text',
-  attachments: Array.isArray(msg.attachments) ? msg.attachments : [],
-  isRead: msg.isRead,
-  readAt: msg.readAt,
-  createdAt: msg.createdAt,
-  updatedAt: msg.updatedAt
-});
+// Safe message response helper with delete support
+const safeMessage = (msg, currentUserId = null) => {
+  const isDeletedForEveryone = Boolean(msg.isDeletedForEveryone);
+  const deletedForList = Array.isArray(msg.deletedFor)
+    ? msg.deletedFor.map((id) => id.toString())
+    : [];
+  const isDeletedForMe = currentUserId
+    ? deletedForList.includes(currentUserId.toString())
+    : false;
+
+  const displayBody = isDeletedForEveryone
+    ? 'This message was deleted'
+    : msg.body || msg.message || '';
+
+  return {
+    id: msg._id,
+    _id: msg._id,
+    conversationId: msg.conversation,
+    sender: safeUserRef(msg.sender),
+    recipient: safeUserRef(msg.recipient),
+    body: displayBody,
+    message: displayBody,
+    messageType: isDeletedForEveryone ? 'text' : msg.messageType || 'text',
+    attachments: isDeletedForEveryone
+      ? []
+      : Array.isArray(msg.attachments)
+      ? msg.attachments
+      : [],
+    isRead: msg.isRead,
+    readAt: msg.readAt,
+    isDeletedForEveryone: isDeletedForEveryone,
+    isDeletedForMe: isDeletedForMe,
+    deletedForEveryoneAt: msg.deletedForEveryoneAt || null,
+    deletedBy: safeUserRef(msg.deletedBy),
+    createdAt: msg.createdAt,
+    updatedAt: msg.updatedAt
+  };
+};
 
 // Helper to determine message type based on attachments
 const determineMessageType = (attachments, defaultType = 'text') => {
@@ -86,17 +108,24 @@ const getMessages = async (req, res) => {
     const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 50));
     const skip = (pageNum - 1) * limitNum;
 
+    // Filter out messages that the logged in user deleted for themselves
+    const filter = {
+      conversation: conversationId,
+      deletedFor: { $ne: req.user._id }
+    };
+
     const [messages, total] = await Promise.all([
-      Message.find({ conversation: conversationId })
+      Message.find(filter)
         .populate('sender', 'name email role avatar')
         .populate('recipient', 'name email role avatar')
+        .populate('deletedBy', 'name email role')
         .sort({ createdAt: 1 })
         .skip(skip)
         .limit(limitNum),
-      Message.countDocuments({ conversation: conversationId })
+      Message.countDocuments(filter)
     ]);
 
-    const formattedMessages = messages.map(safeMessage);
+    const formattedMessages = messages.map((m) => safeMessage(m, req.user._id));
 
     res.status(200).json({
       success: true,
@@ -126,9 +155,18 @@ const getMessageById = async (req, res) => {
 
     const message = await Message.findById(id)
       .populate('sender', 'name email role avatar')
-      .populate('recipient', 'name email role avatar');
+      .populate('recipient', 'name email role avatar')
+      .populate('deletedBy', 'name email role');
 
     if (!message) {
+      return res.status(404).json({ success: false, message: 'Message not found.' });
+    }
+
+    // If deleted for this user
+    if (
+      Array.isArray(message.deletedFor) &&
+      message.deletedFor.some((uid) => uid.toString() === req.user._id.toString())
+    ) {
       return res.status(404).json({ success: false, message: 'Message not found.' });
     }
 
@@ -143,7 +181,7 @@ const getMessageById = async (req, res) => {
       });
     }
 
-    const formatted = safeMessage(message);
+    const formatted = safeMessage(message, req.user._id);
 
     res.status(200).json({
       success: true,
@@ -317,7 +355,7 @@ const sendMessage = async (req, res) => {
       }
     }
 
-    const formattedMessage = safeMessage(populated);
+    const formattedMessage = safeMessage(populated, req.user._id);
 
     res.status(201).json({
       success: true,
@@ -347,6 +385,13 @@ const updateMessage = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Message not found.' });
     }
 
+    if (msg.isDeletedForEveryone) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot edit a deleted message.'
+      });
+    }
+
     const userRole = String(req.user?.role || '').toLowerCase();
     if (msg.sender.toString() !== req.user._id.toString() && userRole !== 'admin') {
       return res.status(403).json({
@@ -369,7 +414,7 @@ const updateMessage = async (req, res) => {
       .populate('sender', 'name email role avatar')
       .populate('recipient', 'name email role avatar');
 
-    const formatted = safeMessage(populated);
+    const formatted = safeMessage(populated, req.user._id);
 
     res.status(200).json({
       success: true,
@@ -387,7 +432,8 @@ const getUnreadMessageCount = async (req, res) => {
   try {
     const unreadCount = await Message.countDocuments({
       recipient: req.user._id,
-      isRead: false
+      isRead: false,
+      deletedFor: { $ne: req.user._id }
     });
 
     res.status(200).json({
@@ -473,7 +519,7 @@ const markSingleMessageAsRead = async (req, res) => {
       .populate('sender', 'name email role avatar')
       .populate('recipient', 'name email role avatar');
 
-    const formatted = safeMessage(populated);
+    const formatted = safeMessage(populated, req.user._id);
 
     res.status(200).json({
       success: true,
@@ -486,8 +532,38 @@ const markSingleMessageAsRead = async (req, res) => {
   }
 };
 
-// DELETE /api/messages/:id (authenticated user)
-const deleteMessage = async (req, res) => {
+// DELETE FOR ME: POST/PATCH /api/messages/:id/delete-for-me
+const deleteMessageForMe = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid message ID.' });
+    }
+
+    const message = await Message.findById(id);
+    if (!message) {
+      return res.status(404).json({ success: false, message: 'Message not found.' });
+    }
+
+    // Add current user ID to deletedFor array
+    await Message.findByIdAndUpdate(id, {
+      $addToSet: { deletedFor: req.user._id }
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Message deleted for you successfully.',
+      messageId: id
+    });
+  } catch (error) {
+    console.error('deleteMessageForMe error:', error);
+    res.status(500).json({ success: false, message: 'Server error deleting message for you.' });
+  }
+};
+
+// DELETE FOR EVERYONE: POST/PATCH /api/messages/:id/delete-for-everyone
+const deleteMessageForEveryone = async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -501,19 +577,86 @@ const deleteMessage = async (req, res) => {
     }
 
     const userRole = String(req.user?.role || '').toLowerCase();
-    if (message.sender.toString() !== req.user._id.toString() && userRole !== 'admin') {
+    const isSender = message.sender.toString() === req.user._id.toString();
+
+    // Sender, Admin, or Manager can delete for everyone
+    if (!isSender && userRole !== 'admin' && userRole !== 'manager') {
       return res.status(403).json({
         success: false,
-        message: 'Access denied. You can only delete your own messages.'
+        message: 'Access denied. Only the sender or an admin/manager can delete this message for everyone.'
       });
     }
 
-    await Message.findByIdAndDelete(id);
+    message.isDeletedForEveryone = true;
+    message.deletedForEveryoneAt = new Date();
+    message.deletedBy = req.user._id;
+    message.body = 'This message was deleted';
+    message.message = 'This message was deleted';
+    message.attachments = [];
+    await message.save();
+
+    // Sync conversation lastMessage if this was the last message
+    const conversation = await Conversation.findById(message.conversation);
+    if (conversation && conversation.lastMessageAt && message.createdAt) {
+      if (new Date(conversation.lastMessageAt).getTime() === new Date(message.createdAt).getTime()) {
+        conversation.lastMessage = 'This message was deleted';
+        await conversation.save();
+      }
+    }
+
+    const populated = await Message.findById(message._id)
+      .populate('sender', 'name email role avatar')
+      .populate('recipient', 'name email role avatar')
+      .populate('deletedBy', 'name email role');
+
+    const formatted = safeMessage(populated, req.user._id);
 
     res.status(200).json({
       success: true,
-      message: 'Message deleted successfully.'
+      message: 'Message deleted for everyone successfully.',
+      data: formatted
     });
+  } catch (error) {
+    console.error('deleteMessageForEveryone error:', error);
+    res.status(500).json({ success: false, message: 'Server error deleting message for everyone.' });
+  }
+};
+
+// DELETE /api/messages/:id (Supports deleteType: "me" | "everyone" | hard delete fallback)
+const deleteMessage = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const deleteType = String(req.query.type || req.body.type || req.body.deleteType || '').toLowerCase();
+
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid message ID.' });
+    }
+
+    // Branch to Delete For Me
+    if (deleteType === 'me' || deleteType === 'for_me') {
+      return deleteMessageForMe(req, res);
+    }
+
+    // Branch to Delete For Everyone
+    if (deleteType === 'everyone' || deleteType === 'for_everyone') {
+      return deleteMessageForEveryone(req, res);
+    }
+
+    const message = await Message.findById(id);
+    if (!message) {
+      return res.status(404).json({ success: false, message: 'Message not found.' });
+    }
+
+    const userRole = String(req.user?.role || '').toLowerCase();
+    const isSender = message.sender.toString() === req.user._id.toString();
+
+    // If sender or admin/manager triggers standard delete, default to delete for everyone
+    if (isSender || userRole === 'admin' || userRole === 'manager') {
+      return deleteMessageForEveryone(req, res);
+    }
+
+    // If recipient tries to delete, default to delete for me
+    return deleteMessageForMe(req, res);
   } catch (error) {
     console.error('deleteMessage error:', error);
     res.status(500).json({ success: false, message: 'Server error deleting message.' });
@@ -528,5 +671,7 @@ module.exports = {
   getUnreadMessageCount,
   markMessagesAsRead,
   markSingleMessageAsRead,
-  deleteMessage
+  deleteMessage,
+  deleteMessageForMe,
+  deleteMessageForEveryone
 };

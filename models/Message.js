@@ -88,6 +88,49 @@ const MessageSchema = new mongoose.Schema(
       default: "internal",
     },
 
+    /*
+     * =========================================================
+     * MESSAGE DELETION (DELETE FOR ME & DELETE FOR EVERYONE)
+     * =========================================================
+     *
+     * deletedFor:
+     *   Array of User ObjectIds who deleted this message for themselves.
+     *
+     * isDeletedForEveryone:
+     *   Flag indicating if the message was retracted by the sender/admin.
+     *
+     * deletedForEveryoneAt:
+     *   Timestamp when the message was deleted for everyone.
+     *
+     * deletedBy:
+     *   The user who triggered delete for everyone.
+     */
+
+    deletedFor: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        index: true,
+      },
+    ],
+
+    isDeletedForEveryone: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+
+    deletedForEveryoneAt: {
+      type: Date,
+      default: null,
+    },
+
+    deletedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+
     metadata: {
       type: mongoose.Schema.Types.Mixed,
       default: {},
@@ -95,15 +138,20 @@ const MessageSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
-  },
+  }
 );
 
 // Custom validation: Message body or at least one attachment must exist
 MessageSchema.pre("validate", function (next) {
+  // If message is deleted for everyone, skip body requirement
+  if (this.isDeletedForEveryone) {
+    return next();
+  }
+
   const hasBody = Boolean(this.body && this.body.trim().length > 0);
   const hasMessage = Boolean(this.message && this.message.trim().length > 0);
   const hasAttachments = Boolean(
-    Array.isArray(this.attachments) && this.attachments.length > 0,
+    Array.isArray(this.attachments) && this.attachments.length > 0
   );
 
   if (!hasBody && !hasMessage && !hasAttachments) {
@@ -133,6 +181,14 @@ MessageSchema.index({
 MessageSchema.index({
   sender: 1,
   createdAt: -1,
+});
+
+MessageSchema.index({
+  deletedFor: 1,
+});
+
+MessageSchema.index({
+  isDeletedForEveryone: 1,
 });
 
 module.exports = mongoose.model("Message", MessageSchema);

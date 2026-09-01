@@ -7,7 +7,9 @@ const {
   getUnreadMessageCount,
   markMessagesAsRead,
   markSingleMessageAsRead,
-  deleteMessage
+  deleteMessage,
+  deleteMessageForMe,
+  deleteMessageForEveryone
 } = require('../controllers/messageController');
 const { protect } = require('../middleware/authMiddleware');
 const upload = require('../middleware/uploadMiddleware');
@@ -34,6 +36,15 @@ router.patch('/read/:conversationId', markMessagesAsRead);
 // ── Single message detail ───────────────────────────────────────────────────
 router.get('/single/:id', getMessageById);
 router.get('/detail/:id', getMessageById);
+
+// ── Delete for Me & Delete for Everyone Routes ──────────────────────────────
+router.post('/:id/delete-for-me', deleteMessageForMe);
+router.patch('/:id/delete-for-me', deleteMessageForMe);
+router.delete('/:id/me', deleteMessageForMe);
+
+router.post('/:id/delete-for-everyone', deleteMessageForEveryone);
+router.patch('/:id/delete-for-everyone', deleteMessageForEveryone);
+router.delete('/:id/everyone', deleteMessageForEveryone);
 
 // ── Messages by Conversation ────────────────────────────────────────────────
 router.get('/:conversationId', getMessages);

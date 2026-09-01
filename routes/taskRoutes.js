@@ -1,4 +1,5 @@
-const express = require('express');
+const express = require("express");
+
 const {
   createTask,
   getAllTasks,
@@ -9,38 +10,254 @@ const {
   getTaskStats,
   addComment,
   getComments,
-  deleteComment
-} = require('../controllers/taskController');
-const { protect } = require('../middleware/authMiddleware');
+  deleteComment,
+  uploadTaskAttachment,
+  deleteTaskAttachment,
+  removeAttachment,
+} = require("../controllers/taskController");
+
+const { protect } = require("../middleware/authMiddleware");
+
+// Existing Multer middleware
+const upload = require("../middleware/uploadMiddleware");
 
 const router = express.Router();
 
-// Apply auth middleware to all task routes
+// ============================================================================
+// FALLBACK HANDLERS
+// ============================================================================
+
+const handleAttachmentDelete =
+  deleteTaskAttachment || removeAttachment;
+
+const handleAttachmentUpload =
+  uploadTaskAttachment || updateTask;
+
+// ============================================================================
+// AUTHENTICATION
+// ============================================================================
+
+// Apply authentication to all task routes
 router.use(protect);
 
-// ── Static routes (Must be defined before /:id) ─────────────────────────────
-router.get('/my', getMyTasks);
-router.get('/stats', getTaskStats);
+// ============================================================================
+// STATIC TASK ROUTES
+// IMPORTANT: These routes must come before /:id
+// ============================================================================
 
-// ── Main Task Routes ────────────────────────────────────────────────────────
-router.get('/', getAllTasks);
-router.post('/', createTask);
+// GET /api/tasks/my
+router.get("/my", getMyTasks);
 
-// ── Task Comments ───────────────────────────────────────────────────────────
-router.get('/:id/comments', getComments);
-router.post('/:id/comments', addComment);
-router.delete('/:id/comments/:commentId', deleteComment);
+// GET /api/tasks/stats
+router.get("/stats", getTaskStats);
 
-// ── Single Task Item ────────────────────────────────────────────────────────
-router.get('/:id', getTaskById);
-router.put('/:id', updateTask);
-router.patch('/:id', updateTask);
-router.patch('/:id/status', updateTask);
-router.put('/:id/status', updateTask);
-router.patch('/:id/priority', updateTask);
-router.put('/:id/priority', updateTask);
-router.patch('/:id/assign', updateTask);
-router.put('/:id/assign', updateTask);
-router.delete('/:id', deleteTask);
+// ============================================================================
+// MAIN TASK ROUTES
+// ============================================================================
+
+// GET /api/tasks
+router.get("/", getAllTasks);
+
+// ============================================================================
+// CREATE TASK
+// POST /api/tasks
+//
+// Supports:
+// - normal task creation
+// - file
+// - files
+// - attachments
+// ============================================================================
+
+router.post(
+  "/",
+  upload.fields([
+    {
+      name: "file",
+      maxCount: 1,
+    },
+    {
+      name: "files",
+      maxCount: 10,
+    },
+    {
+      name: "attachments",
+      maxCount: 10,
+    },
+  ]),
+  createTask
+);
+
+// ============================================================================
+// TASK ATTACHMENTS
+// ============================================================================
+
+// POST /api/tasks/:id/attachments
+//
+// Upload attachment to an existing task
+router.post(
+  "/:id/attachments",
+  upload.fields([
+    {
+      name: "file",
+      maxCount: 1,
+    },
+    {
+      name: "files",
+      maxCount: 10,
+    },
+    {
+      name: "attachments",
+      maxCount: 10,
+    },
+  ]),
+  handleAttachmentUpload
+);
+
+// DELETE /api/tasks/:id/attachments/:attachmentId
+router.delete(
+  "/:id/attachments/:attachmentId",
+  handleAttachmentDelete
+);
+
+// ============================================================================
+// TASK COMMENTS
+// ============================================================================
+
+// GET /api/tasks/:id/comments
+router.get(
+  "/:id/comments",
+  getComments
+);
+
+// POST /api/tasks/:id/comments
+router.post(
+  "/:id/comments",
+  addComment
+);
+
+// DELETE /api/tasks/:id/comments/:commentId
+router.delete(
+  "/:id/comments/:commentId",
+  deleteComment
+);
+
+// ============================================================================
+// SINGLE TASK
+// ============================================================================
+
+// GET /api/tasks/:id
+router.get(
+  "/:id",
+  getTaskById
+);
+
+// ============================================================================
+// UPDATE TASK
+// Supports file attachments
+// ============================================================================
+
+// PUT /api/tasks/:id
+router.put(
+  "/:id",
+  upload.fields([
+    {
+      name: "file",
+      maxCount: 1,
+    },
+    {
+      name: "files",
+      maxCount: 10,
+    },
+    {
+      name: "attachments",
+      maxCount: 10,
+    },
+  ]),
+  updateTask
+);
+
+// PATCH /api/tasks/:id
+router.patch(
+  "/:id",
+  upload.fields([
+    {
+      name: "file",
+      maxCount: 1,
+    },
+    {
+      name: "files",
+      maxCount: 10,
+    },
+    {
+      name: "attachments",
+      maxCount: 10,
+    },
+  ]),
+  updateTask
+);
+
+// ============================================================================
+// TASK STATUS
+// ============================================================================
+
+// PATCH /api/tasks/:id/status
+router.patch(
+  "/:id/status",
+  updateTask
+);
+
+// PUT /api/tasks/:id/status
+router.put(
+  "/:id/status",
+  updateTask
+);
+
+// ============================================================================
+// TASK PRIORITY
+// ============================================================================
+
+// PATCH /api/tasks/:id/priority
+router.patch(
+  "/:id/priority",
+  updateTask
+);
+
+// PUT /api/tasks/:id/priority
+router.put(
+  "/:id/priority",
+  updateTask
+);
+
+// ============================================================================
+// TASK ASSIGNMENT
+// ============================================================================
+
+// PATCH /api/tasks/:id/assign
+router.patch(
+  "/:id/assign",
+  updateTask
+);
+
+// PUT /api/tasks/:id/assign
+router.put(
+  "/:id/assign",
+  updateTask
+);
+
+// ============================================================================
+// DELETE TASK
+// ============================================================================
+
+// DELETE /api/tasks/:id
+router.delete(
+  "/:id",
+  deleteTask
+);
+
+// ============================================================================
+// EXPORT
+// ============================================================================
 
 module.exports = router;
+
