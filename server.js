@@ -90,20 +90,37 @@ if (!fs.existsSync(uploadsDir)) {
 const allowedOrigins = [
   "http://localhost:3000",
   "http://127.0.0.1:3000",
+  "https://localpro1.net",
 ];
+
+if (process.env.FRONTEND_URL) {
+  allowedOrigins.push(
+    process.env.FRONTEND_URL.replace(/\/$/, "")
+  );
+}
 
 app.use(
   cors({
     origin: function (origin, callback) {
+      // Allow requests without an Origin header
+      // such as Postman, server-to-server requests, etc.
       if (!origin) {
         return callback(null, true);
       }
 
-      if (allowedOrigins.includes(origin)) {
+      const normalizedOrigin = origin.replace(/\/$/, "");
+
+      if (allowedOrigins.includes(normalizedOrigin)) {
         return callback(null, true);
       }
 
-      return callback(null, true);
+      console.error(
+        `CORS blocked origin: ${origin}`
+      );
+
+      return callback(
+        new Error("Not allowed by CORS")
+      );
     },
 
     credentials: true,
@@ -338,7 +355,8 @@ app.use((error, req, res, next) => {
     if (error.code === "LIMIT_FILE_SIZE") {
       return res.status(400).json({
         success: false,
-        message: "File size exceeds the allowed limit (10MB).",
+        message:
+          "File size exceeds the allowed limit (10MB).",
       });
     }
 
@@ -374,7 +392,10 @@ connectDB()
       );
 
       try {
-        if (typeof processAttendanceNotifications === "function") {
+        if (
+          typeof processAttendanceNotifications ===
+          "function"
+        ) {
           const result =
             await processAttendanceNotifications();
 
@@ -393,7 +414,10 @@ connectDB()
       attendanceScheduler =
         setInterval(async () => {
           try {
-            if (typeof processAttendanceNotifications === "function") {
+            if (
+              typeof processAttendanceNotifications ===
+              "function"
+            ) {
               const result =
                 await processAttendanceNotifications();
 
@@ -448,7 +472,9 @@ const shutdown = async (signal) => {
     clearInterval(
       attendanceScheduler
     );
+
     attendanceScheduler = null;
+
     console.log(
       "[Attendance] Scheduler stopped."
     );
@@ -458,6 +484,7 @@ const shutdown = async (signal) => {
     console.log(
       "HTTP server closed."
     );
+
     process.exit(0);
   });
 };
@@ -469,3 +496,4 @@ process.on("SIGINT", () => {
 process.on("SIGTERM", () => {
   shutdown("SIGTERM");
 });
+
