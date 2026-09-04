@@ -27,15 +27,24 @@ let setUserAttendanceSchedule = null;
 
 try {
   const attendanceController = require("../controllers/attendanceController");
-  getUserAttendanceSchedule = attendanceController.getUserAttendanceSchedule;
-  setUserAttendanceSchedule = attendanceController.setUserAttendanceSchedule;
+
+  getUserAttendanceSchedule =
+    attendanceController.getUserAttendanceSchedule;
+
+  setUserAttendanceSchedule =
+    attendanceController.setUserAttendanceSchedule;
 } catch (e) {
-  // If attendanceController doesn't export them, fallback gracefully
+  // If attendanceController doesn't export them,
+  // fallback gracefully.
 }
 
-// Fallback handlers if attendance controller functions are not defined
-const handleGetSchedule = getUserAttendanceSchedule || getUserById;
-const handleSetSchedule = setUserAttendanceSchedule || updateUser;
+// Fallback handlers if attendance controller functions
+// are not defined.
+const handleGetSchedule =
+  getUserAttendanceSchedule || getUserById;
+
+const handleSetSchedule =
+  setUserAttendanceSchedule || updateUser;
 
 // =====================================================
 // AUTH MIDDLEWARE
@@ -52,6 +61,7 @@ const router = express.Router();
 // AUTHENTICATION
 // =====================================================
 
+// All user routes require authentication.
 router.use(protect);
 
 // =====================================================
@@ -258,6 +268,10 @@ router.patch(
 // =====================================================
 
 // DELETE /api/users/:id
+//
+// Only authenticated ADMIN can delete a user.
+// The actual deletion is handled by deleteUser
+// inside userController.js.
 router.delete(
   "/:id",
   authorize("admin"),

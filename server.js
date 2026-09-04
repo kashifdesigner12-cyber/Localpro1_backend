@@ -23,7 +23,6 @@ const express = require("express");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const multer = require("multer");
-
 const connectDB = require("./config/db");
 
 // =====================================================
@@ -496,4 +495,3 @@ process.on("SIGINT", () => {
 process.on("SIGTERM", () => {
   shutdown("SIGTERM");
 });
-

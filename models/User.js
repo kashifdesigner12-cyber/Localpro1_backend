@@ -35,7 +35,6 @@ const AttendanceScheduleSchema = new mongoose.Schema(
 
     // --------------------------------------------------------
     // START TIME
-    // Example: "09:00"
     // --------------------------------------------------------
 
     startTime: {
@@ -50,7 +49,6 @@ const AttendanceScheduleSchema = new mongoose.Schema(
 
     // --------------------------------------------------------
     // END TIME
-    // Example: "17:00"
     // --------------------------------------------------------
 
     endTime: {
@@ -64,7 +62,7 @@ const AttendanceScheduleSchema = new mongoose.Schema(
     },
 
     // --------------------------------------------------------
-    // WINDOW START & END (FOR CHECK-IN WINDOW)
+    // WINDOW START & END
     // --------------------------------------------------------
 
     windowStart: {
@@ -100,7 +98,6 @@ const AttendanceScheduleSchema = new mongoose.Schema(
 
     // --------------------------------------------------------
     // TIMEZONE
-    // Example: Asia/Karachi
     // --------------------------------------------------------
 
     timezone: {
@@ -136,8 +133,6 @@ const UserSchema = new mongoose.Schema(
       unique: true,
       lowercase: true,
       trim: true,
-
-      // FIXED EMAIL REGEX
       match: [
         /^\S+@\S+\.\S+$/,
         "Please provide a valid email",
@@ -193,6 +188,27 @@ const UserSchema = new mongoose.Schema(
     },
 
     // ========================================================
+    // DELETE / SOFT DELETE STATUS
+    // ========================================================
+    //
+    // These fields allow the backend to mark a user as deleted.
+    // The actual delete operation will be handled by the
+    // admin user-delete controller that we will update next.
+    //
+    // ========================================================
+
+    isDeleted: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+
+    deletedAt: {
+      type: Date,
+      default: null,
+    },
+
+    // ========================================================
     // AVATAR
     // ========================================================
 
@@ -214,31 +230,12 @@ const UserSchema = new mongoose.Schema(
     // ========================================================
     // ATTENDANCE SETTINGS
     // ========================================================
-    //
-    // This is the default/simple attendance schedule.
-    //
-    // Example:
-    //
-    // enabled: true
-    // attendanceTime: "09:00"
-    // gracePeriodMinutes: 10
-    // timezone: "Asia/Karachi"
-    //
-    // ========================================================
 
     attendanceSettings: {
-      // ------------------------------------------------------
-      // ATTENDANCE ENABLED
-      // ------------------------------------------------------
-
       enabled: {
         type: Boolean,
         default: false,
       },
-
-      // ------------------------------------------------------
-      // DEFAULT ATTENDANCE TIME
-      // ------------------------------------------------------
 
       attendanceTime: {
         type: String,
@@ -250,20 +247,12 @@ const UserSchema = new mongoose.Schema(
         ],
       },
 
-      // ------------------------------------------------------
-      // DEFAULT GRACE PERIOD
-      // ------------------------------------------------------
-
       gracePeriodMinutes: {
         type: Number,
         default: 10,
         min: 1,
         max: 60,
       },
-
-      // ------------------------------------------------------
-      // ATTENDANCE TIMEZONE
-      // ------------------------------------------------------
 
       timezone: {
         type: String,
@@ -273,7 +262,7 @@ const UserSchema = new mongoose.Schema(
     },
 
     // ========================================================
-    // ATTENDANCE SCHEDULE (Direct Object & Array Supported)
+    // ATTENDANCE SCHEDULE
     // ========================================================
 
     attendanceSchedule: {

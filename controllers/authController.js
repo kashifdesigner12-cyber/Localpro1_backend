@@ -52,18 +52,9 @@ const generateToken = (id, role) =>
 // ==========================================
 const getCookieOptions = () => ({
   httpOnly: true,
-
-  // Local frontend/backend are both running on localhost.
-  // "lax" allows the browser to send the cookie normally
-  // during navigation and API requests.
   sameSite: "lax",
-
-  // Do not require HTTPS during local development.
   secure: process.env.NODE_ENV === "production",
-
-  // Keep authentication available for 7 days.
   maxAge: 7 * 24 * 60 * 60 * 1000,
-
   path: "/",
 });
 
@@ -175,7 +166,16 @@ const login = async (req, res) => {
     }).select("+password");
 
     // User not found
+    // This also covers permanently deleted users.
     if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid email or password.",
+      });
+    }
+
+    // Extra protection for soft-deleted users
+    if (user.isDeleted === true) {
       return res.status(401).json({
         success: false,
         message: "Invalid email or password.",
@@ -196,8 +196,15 @@ const login = async (req, res) => {
     ) {
       return res.status(403).json({
         success: false,
-        message:
-          "Your account has been deactivated or blocked.",
+        message: "Your account has been deactivated or blocked.",
+      });
+    }
+
+    // Check isActive flag
+    if (user.isActive === false) {
+      return res.status(403).json({
+        success: false,
+        message: "Your account has been deactivated.",
       });
     }
 
@@ -214,12 +221,8 @@ const login = async (req, res) => {
     // Generate JWT
     const token = generateToken(user._id, user.role);
 
-    // Store JWT inside HttpOnly cookie.
-    res.cookie(
-      "token",
-      token,
-      getCookieOptions()
-    );
+    // Store JWT inside HttpOnly cookie
+    res.cookie("token", token, getCookieOptions());
 
     return res.status(200).json({
       success: true,
@@ -256,6 +259,24 @@ const getMe = async (req, res) => {
       return res.status(404).json({
         success: false,
         message: "User not found.",
+      });
+    }
+
+    // Prevent deleted/deactivated users from continuing
+    if (user.isDeleted === true || user.isActive === false) {
+      return res.status(401).json({
+        success: false,
+        message: "Your account is no longer active.",
+      });
+    }
+
+    if (
+      user.status === "Blocked" ||
+      user.status === "Inactive"
+    ) {
+      return res.status(401).json({
+        success: false,
+        message: "Your account is no longer active.",
       });
     }
 
@@ -308,6 +329,7 @@ const updateProfile = async (req, res) => {
           message: "Name cannot be empty.",
         });
       }
+
       user.name = name.trim();
     }
 
@@ -319,31 +341,42 @@ const updateProfile = async (req, res) => {
       user.avatar = avatar;
     }
 
-    // Update preferences & schedules
-    if (preferences !== undefined && typeof preferences === "object") {
+    // Update preferences
+    if (
+      preferences !== undefined &&
+      typeof preferences === "object"
+    ) {
       user.preferences = {
         ...(user.preferences || {}),
         ...preferences,
       };
     }
 
+    // Update attendance schedule
     if (attendanceSchedule !== undefined) {
       user.attendanceSchedule = attendanceSchedule;
+
       user.preferences = {
         ...(user.preferences || {}),
         attendanceSchedule,
       };
     }
 
+    // Update work schedule
     if (workSchedule !== undefined) {
       user.workSchedule = workSchedule;
+
       user.preferences = {
         ...(user.preferences || {}),
         workSchedule,
       };
     }
 
-    if (attendanceSettings !== undefined && typeof attendanceSettings === "object") {
+    // Update attendance settings
+    if (
+      attendanceSettings !== undefined &&
+      typeof attendanceSettings === "object"
+    ) {
       user.attendanceSettings = {
         ...(user.attendanceSettings || {}),
         ...attendanceSettings,
@@ -411,14 +444,21 @@ const changePassword = async (req, res) => {
       });
     }
 
-    const user = await User.findById(
-      req.user._id
-    ).select("+password");
+    const user = await User.findById(req.user._id).select(
+      "+password"
+    );
 
     if (!user) {
       return res.status(404).json({
         success: false,
         message: "User not found.",
+      });
+    }
+
+    if (user.isDeleted === true || user.isActive === false) {
+      return res.status(403).json({
+        success: false,
+        message: "Your account is no longer active.",
       });
     }
 
@@ -454,10 +494,7 @@ const changePassword = async (req, res) => {
 // Logout User
 // ==========================================
 const logout = (req, res) => {
-  res.clearCookie(
-    "token",
-    getCookieOptions()
-  );
+  res.clearCookie("token", getCookieOptions());
 
   return res.status(200).json({
     success: true,

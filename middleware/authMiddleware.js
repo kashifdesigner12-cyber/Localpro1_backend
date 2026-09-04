@@ -8,6 +8,10 @@ const User = require("../models/User");
 // 1. Authorization: Bearer <token>
 // 2. HttpOnly cookie: token
 // 3. x-auth-token header
+//
+// Also checks the CURRENT user from database.
+// This means deleted/blocked/inactive users cannot continue
+// using an old JWT token.
 // ============================================================
 
 const protect = async (req, res, next) => {
@@ -22,18 +26,14 @@ const protect = async (req, res, next) => {
       req.headers.authorization &&
       req.headers.authorization.startsWith("Bearer ")
     ) {
-      token =
-        req.headers.authorization.split(" ")[1];
+      token = req.headers.authorization.split(" ")[1];
     }
 
     // --------------------------------------------------------
     // 2. HTTPONLY COOKIE
     // --------------------------------------------------------
 
-    else if (
-      req.cookies &&
-      req.cookies.token
-    ) {
+    else if (req.cookies && req.cookies.token) {
       token = req.cookies.token;
     }
 
@@ -41,11 +41,8 @@ const protect = async (req, res, next) => {
     // 3. X-AUTH-TOKEN
     // --------------------------------------------------------
 
-    else if (
-      req.headers["x-auth-token"]
-    ) {
-      token =
-        req.headers["x-auth-token"];
+    else if (req.headers["x-auth-token"]) {
+      token = req.headers["x-auth-token"];
     }
 
     // --------------------------------------------------------
@@ -55,8 +52,7 @@ const protect = async (req, res, next) => {
     if (!token) {
       return res.status(401).json({
         success: false,
-        message:
-          "No token provided. Access denied.",
+        message: "No token provided. Access denied.",
       });
     }
 
@@ -89,10 +85,7 @@ const protect = async (req, res, next) => {
       );
     } catch (error) {
       // Token expired
-      if (
-        error.name ===
-        "TokenExpiredError"
-      ) {
+      if (error.name === "TokenExpiredError") {
         return res.status(401).json({
           success: false,
           message:
@@ -111,51 +104,57 @@ const protect = async (req, res, next) => {
     // VALIDATE TOKEN PAYLOAD
     // --------------------------------------------------------
 
-    if (
-      !decoded ||
-      !decoded.id
-    ) {
+    if (!decoded || !decoded.id) {
       return res.status(401).json({
         success: false,
-        message:
-          "Invalid token payload.",
+        message: "Invalid token payload.",
       });
     }
 
     // --------------------------------------------------------
     // FIND CURRENT USER
     // --------------------------------------------------------
+    // IMPORTANT:
+    // We fetch the user from MongoDB on every protected request.
+    //
+    // If admin deleted the user:
+    // User.findById() returns null.
+    // Therefore the old JWT becomes useless.
+    // --------------------------------------------------------
 
-    const user =
-      await User.findById(
-        decoded.id
-      ).select("-password");
+    const user = await User.findById(decoded.id).select(
+      "-password"
+    );
+
+    // --------------------------------------------------------
+    // USER DOES NOT EXIST
+    // --------------------------------------------------------
 
     if (!user) {
       return res.status(401).json({
         success: false,
         message:
-          "User no longer exists.",
+          "User no longer exists. Please login again.",
       });
     }
 
     // --------------------------------------------------------
-    // ACCOUNT STATUS
+    // SOFT-DELETED USER
     // --------------------------------------------------------
 
-    if (
-      user.status === "Blocked"
-    ) {
-      return res.status(403).json({
+    if (user.isDeleted === true) {
+      return res.status(401).json({
         success: false,
         message:
-          "Your account has been blocked.",
+          "Your account has been deleted. Please contact the administrator.",
       });
     }
 
-    if (
-      user.status === "Inactive"
-    ) {
+    // --------------------------------------------------------
+    // IS ACTIVE CHECK
+    // --------------------------------------------------------
+
+    if (user.isActive === false) {
       return res.status(403).json({
         success: false,
         message:
@@ -163,9 +162,27 @@ const protect = async (req, res, next) => {
       });
     }
 
-    if (
-      user.status === "Pending"
-    ) {
+    // --------------------------------------------------------
+    // ACCOUNT STATUS
+    // --------------------------------------------------------
+
+    if (user.status === "Blocked") {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Your account has been blocked.",
+      });
+    }
+
+    if (user.status === "Inactive") {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Your account is inactive.",
+      });
+    }
+
+    if (user.status === "Pending") {
       return res.status(403).json({
         success: false,
         message:
@@ -174,7 +191,7 @@ const protect = async (req, res, next) => {
     }
 
     // --------------------------------------------------------
-    // ATTACH USER TO REQUEST
+    // ATTACH CURRENT USER TO REQUEST
     // --------------------------------------------------------
 
     req.user = user;
@@ -214,8 +231,27 @@ const authorize = (...roles) => {
     if (!req.user) {
       return res.status(401).json({
         success: false,
+        message: "Authentication required.",
+      });
+    }
+
+    // --------------------------------------------------------
+    // EXTRA ACCOUNT CHECK
+    // --------------------------------------------------------
+
+    if (req.user.isDeleted === true) {
+      return res.status(401).json({
+        success: false,
         message:
-          "Authentication required.",
+          "Your account has been deleted.",
+      });
+    }
+
+    if (req.user.isActive === false) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Your account is inactive.",
       });
     }
 
@@ -223,9 +259,7 @@ const authorize = (...roles) => {
     // ROLE CHECK
     // --------------------------------------------------------
 
-    if (
-      !roles.includes(req.user.role)
-    ) {
+    if (!roles.includes(req.user.role)) {
       return res.status(403).json({
         success: false,
         message:
