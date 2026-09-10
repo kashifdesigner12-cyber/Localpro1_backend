@@ -102,7 +102,7 @@ app.use(
   cors({
     origin: function (origin, callback) {
       // Allow requests without an Origin header
-      // such as Postman, server-to-server requests, etc.
+      // such as Postman and server-to-server requests.
       if (!origin) {
         return callback(null, true);
       }
@@ -182,10 +182,21 @@ app.use(
 // HEALTH CHECK
 // =====================================================
 
+// Existing API health endpoint
 app.get("/api/health", (req, res) => {
   return res.status(200).json({
     success: true,
     message: "API is working",
+    timestamp: new Date(),
+  });
+});
+
+// Simple health endpoint
+// Useful for direct browser/server monitoring.
+app.get("/health", (req, res) => {
+  return res.status(200).json({
+    success: true,
+    message: "Backend is running",
     timestamp: new Date(),
   });
 });
@@ -379,84 +390,104 @@ const PORT = process.env.PORT || 5000;
 
 let attendanceScheduler = null;
 
-connectDB()
-  .then(async () => {
-    try {
-      const {
-        processAttendanceNotifications,
-      } = require("./controllers/attendanceController");
+const startAttendanceScheduler = () => {
+  try {
+    const {
+      processAttendanceNotifications,
+    } = require("./controllers/attendanceController");
 
-      console.log(
-        "[Attendance] Running initial attendance processing..."
+    if (
+      typeof processAttendanceNotifications !==
+      "function"
+    ) {
+      console.warn(
+        "[Attendance] processAttendanceNotifications is not available."
       );
 
-      try {
-        if (
-          typeof processAttendanceNotifications ===
-          "function"
-        ) {
-          const result =
-            await processAttendanceNotifications();
+      return;
+    }
 
-          console.log(
-            "[Attendance] Initial processing:",
-            result
-          );
-        }
-      } catch (error) {
+    // Run initial processing in the background.
+    // Do not block the HTTP server from starting.
+    Promise.resolve()
+      .then(() => {
+        console.log(
+          "[Attendance] Running initial attendance processing..."
+        );
+
+        return processAttendanceNotifications();
+      })
+      .then((result) => {
+        console.log(
+          "[Attendance] Initial processing:",
+          result
+        );
+      })
+      .catch((error) => {
         console.error(
           "[Attendance] Initial processing error:",
           error
         );
+      });
+
+    // Run every 60 seconds.
+    attendanceScheduler = setInterval(async () => {
+      try {
+        const result =
+          await processAttendanceNotifications();
+
+        console.log(
+          "[Attendance] Scheduler tick:",
+          result
+        );
+      } catch (error) {
+        console.error(
+          "[Attendance] Scheduler error:",
+          error
+        );
       }
+    }, 60 * 1000);
 
-      attendanceScheduler =
-        setInterval(async () => {
-          try {
-            if (
-              typeof processAttendanceNotifications ===
-              "function"
-            ) {
-              const result =
-                await processAttendanceNotifications();
+    console.log(
+      "[Attendance] Scheduler started. Running every 60 seconds."
+    );
+  } catch (error) {
+    console.error(
+      "[Attendance] Failed to start attendance scheduler:",
+      error
+    );
+  }
+};
 
-              console.log(
-                "[Attendance] Scheduler tick:",
-                result
-              );
-            }
-          } catch (error) {
-            console.error(
-              "[Attendance] Scheduler error:",
-              error
-            );
-          }
-        }, 60 * 1000);
+const startServer = async () => {
+  try {
+    await connectDB();
 
-      console.log(
-        "[Attendance] Scheduler started. Running every 60 seconds."
-      );
-    } catch (error) {
-      console.error(
-        "[Attendance] Failed to start attendance scheduler:",
-        error
-      );
-    }
+    console.log(
+      "[Database] MongoDB connection established."
+    );
 
+    // Start HTTP server immediately after DB connection.
     server.listen(PORT, () => {
       console.log(
         `Backend running on http://localhost:${PORT}`
       );
     });
-  })
-  .catch((error) => {
+
+    // Start non-critical background work
+    // without blocking the HTTP server.
+    startAttendanceScheduler();
+  } catch (error) {
     console.error(
       "Failed to connect to MongoDB:",
       error
     );
 
     process.exit(1);
-  });
+  }
+};
+
+startServer();
 
 // =====================================================
 // GRACEFUL SHUTDOWN

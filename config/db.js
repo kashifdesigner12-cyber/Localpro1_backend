@@ -3,22 +3,6 @@ const mongoose = require("mongoose");
 // =====================================================
 // MongoDB Connection
 // =====================================================
-//
-// Development:
-//   Uses local MongoDB
-//
-// Production:
-//   Uses MongoDB Atlas
-//
-// Environment variables:
-//
-// Development:
-//   MONGO_LOCAL_URI=mongodb://127.0.0.1:27017/local-pro-1
-//
-// Production:
-//   MONGO_URI=mongodb+srv://USERNAME:PASSWORD@cluster.mongodb.net/...
-//
-// =====================================================
 
 const connectDB = async () => {
   try {
@@ -53,7 +37,7 @@ const connectDB = async () => {
       !mongoUri.startsWith("mongodb+srv://")
     ) {
       throw new Error(
-        `Invalid MongoDB URI. URI must start with mongodb:// or mongodb+srv://`
+        "Invalid MongoDB URI. URI must start with mongodb:// or mongodb+srv://"
       );
     }
 
@@ -69,13 +53,11 @@ const connectDB = async () => {
     console.log("=================================");
     console.log("MongoDB Connection");
     console.log("=================================");
-
     console.log(
       `Environment: ${
         isProduction ? "production" : "development"
       }`
     );
-
     console.log(
       `Database: ${
         isProduction
@@ -83,52 +65,43 @@ const connectDB = async () => {
           : "Local MongoDB"
       }`
     );
-
-    console.log(
-      "MongoDB URI:",
-      safeUri
-    );
+    console.log("MongoDB URI:", safeUri);
 
     // =================================================
     // Connect MongoDB
     // =================================================
 
-    console.log(
-      "MongoDB: Connecting..."
-    );
+    console.log("MongoDB: Connecting...");
 
     const conn = await mongoose.connect(
       mongoUri,
       {
-        // ---------------------------------------------
-        // Connection timeout
-        // ---------------------------------------------
-
+        // Fail reasonably fast if Atlas/server is unavailable.
         serverSelectionTimeoutMS: isProduction
-          ? 15000
+          ? 10000
           : 5000,
 
         connectTimeoutMS: isProduction
-          ? 15000
+          ? 10000
           : 5000,
 
-        socketTimeoutMS: 45000,
+        // Prevent a dead socket from hanging forever.
+        socketTimeoutMS: 30000,
 
-        // ---------------------------------------------
-        // MongoDB recommended options
-        // ---------------------------------------------
+        // Connection pool.
+        maxPoolSize: isProduction ? 20 : 10,
+        minPoolSize: isProduction ? 2 : 0,
 
-        maxPoolSize: 10,
-
-        minPoolSize: 2,
-
+        // MongoDB retry support.
         retryWrites: true,
 
-        // ---------------------------------------------
-        // Keep connection alive
-        // ---------------------------------------------
-
+        // Keep connection state healthy.
         heartbeatFrequencyMS: 10000,
+
+        // Do not automatically create indexes on every
+        // production startup. Indexes should be managed
+        // deliberately for production performance.
+        autoIndex: !isProduction,
       }
     );
 
@@ -136,68 +109,38 @@ const connectDB = async () => {
     // Connection successful
     // =================================================
 
-    console.log(
-      "================================="
-    );
-
-    console.log(
-      "MongoDB Connected Successfully"
-    );
-
-    console.log(
-      `Host: ${conn.connection.host}`
-    );
-
+    console.log("=================================");
+    console.log("MongoDB Connected Successfully");
+    console.log(`Host: ${conn.connection.host}`);
     console.log(
       `Database: ${
         conn.connection.name || "default"
       }`
     );
-
-    console.log(
-      "================================="
-    );
+    console.log("=================================");
 
     return conn;
-
   } catch (error) {
-    console.error(
-      "================================="
-    );
-
-    console.error(
-      "MongoDB Connection Failed"
-    );
-
-    console.error(
-      "================================="
-    );
-
-    console.error(
-      "Error:",
-      error.message
-    );
+    console.error("=================================");
+    console.error("MongoDB Connection Failed");
+    console.error("=================================");
+    console.error("Error:", error.message);
 
     // =================================================
     // Development-specific error
     // =================================================
 
-    if (
-      process.env.NODE_ENV !== "production"
-    ) {
+    if (process.env.NODE_ENV !== "production") {
       console.error("");
       console.error(
         "Make sure MongoDB is running locally."
       );
-
       console.error(
         "Expected local MongoDB URI:"
       );
-
       console.error(
         "mongodb://127.0.0.1:27017/local-pro-1"
       );
-
       console.error("");
     }
 
@@ -205,41 +148,22 @@ const connectDB = async () => {
     // Production-specific error
     // =================================================
 
-    if (
-      process.env.NODE_ENV === "production"
-    ) {
+    if (process.env.NODE_ENV === "production") {
       console.error("");
       console.error(
         "Check your MongoDB Atlas connection:"
       );
-
-      console.error(
-        "1. MONGO_URI is correct"
-      );
-
-      console.error(
-        "2. MongoDB Atlas IP access list"
-      );
-
-      console.error(
-        "3. Database username/password"
-      );
-
-      console.error(
-        "4. MongoDB Atlas cluster status"
-      );
-
+      console.error("1. MONGO_URI is correct");
+      console.error("2. MongoDB Atlas IP access list");
+      console.error("3. Database username/password");
+      console.error("4. MongoDB Atlas cluster status");
       console.error("");
     }
 
-    // =================================================
-    // Do not start Express without MongoDB
-    // =================================================
-
+    // Do not start Express without MongoDB.
     process.exit(1);
   }
 };
-
 
 // =====================================================
 // Mongoose Events
@@ -273,7 +197,6 @@ mongoose.connection.on(
   }
 );
 
-
 // =====================================================
 // Graceful MongoDB Shutdown
 // =====================================================
@@ -297,9 +220,5 @@ const closeMongoDB = async () => {
   }
 };
 
-
 module.exports = connectDB;
-
-module.exports.closeMongoDB =
-  closeMongoDB;
-
+module.exports.closeMongoDB = closeMongoDB;

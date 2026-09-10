@@ -19,86 +19,20 @@ const router = express.Router();
 // PUBLIC AUTH ROUTES
 // ==========================================
 
-// ==========================================
-// POST /api/auth/register
-// Register
-// ==========================================
-router.post(
-  "/register",
-  register
-);
-
-// ==========================================
-// POST /api/auth/login
-// Login
-// ==========================================
-router.post(
-  "/login",
-  login
-);
-
-// ==========================================
-// POST /api/auth/logout
-// Logout
-// ==========================================
-router.post(
-  "/logout",
-  logout
-);
+router.post("/register", register);
+router.post("/login", login);
+router.post("/logout", logout);
 
 // ==========================================
 // PROTECTED AUTH ROUTES
 // ==========================================
 
-// ==========================================
-// GET /api/auth/me
-// Get Current Logged-in User
-// ==========================================
-router.get(
-  "/me",
-  protect,
-  getMe
-);
+router.get("/me", protect, getMe);
+router.put("/me", protect, updateProfile);
+router.put("/profile", protect, updateProfile);
 
-// ==========================================
-// PUT /api/auth/me
-// Update Current User Profile
-// ==========================================
-router.put(
-  "/me",
-  protect,
-  updateProfile
-);
-
-// ==========================================
-// PUT /api/auth/profile
-// Backward Compatibility
-// ==========================================
-router.put(
-  "/profile",
-  protect,
-  updateProfile
-);
-
-// ==========================================
-// PATCH /api/auth/change-password
-// Change Password
-// ==========================================
-router.patch(
-  "/change-password",
-  protect,
-  changePassword
-);
-
-// ==========================================
-// PUT /api/auth/change-password
-// Backward Compatibility
-// ==========================================
-router.put(
-  "/change-password",
-  protect,
-  changePassword
-);
+router.patch("/change-password", protect, changePassword);
+router.put("/change-password", protect, changePassword);
 
 // ==========================================
 // EXPORT

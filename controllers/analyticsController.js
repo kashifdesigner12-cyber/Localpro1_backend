@@ -137,14 +137,25 @@ const getTaskAnalytics = async (req, res) => {
       : { ...dateFilter };
 
     const now = new Date();
-    const [total, byStatus, byPriority, completed, overdue] = await Promise.all([
+    
+    // Optimized: Used $facet to combine multiple aggregations into a single DB query
+    const [total, completed, overdue, aggregates] = await Promise.all([
       Task.countDocuments(filter),
-      Task.aggregate([{ $match: filter }, { $group: { _id: '$status', count: { $sum: 1 } } }]),
-      Task.aggregate([{ $match: filter }, { $group: { _id: '$priority', count: { $sum: 1 } } }]),
       Task.countDocuments({ ...filter, status: 'Completed' }),
-      Task.countDocuments({ ...filter, dueDate: { $lt: now, $ne: null }, status: { $nin: ['Completed', 'Cancelled'] } })
+      Task.countDocuments({ ...filter, dueDate: { $lt: now, $ne: null }, status: { $nin: ['Completed', 'Cancelled'] } }),
+      Task.aggregate([
+        { $match: filter },
+        { 
+          $facet: {
+            byStatus: [{ $group: { _id: '$status', count: { $sum: 1 } } }],
+            byPriority: [{ $group: { _id: '$priority', count: { $sum: 1 } } }]
+          } 
+        }
+      ])
     ]);
 
+    const byStatus = aggregates[0]?.byStatus || [];
+    const byPriority = aggregates[0]?.byPriority || [];
     const completionRate = total > 0 ? Math.round((completed / total) * 100) : 0;
 
     res.status(200).json({
@@ -166,14 +177,25 @@ const getLeadAnalytics = async (req, res) => {
       ? { $or: [{ userId: req.user._id }, { user: req.user._id }, { assignedTo: req.user._id }], ...dateFilter }
       : { ...dateFilter };
 
-    const [total, byStatus, byLeadStatus, bySource, converted] = await Promise.all([
+    // Optimized: Used $facet to combine 3 aggregations into a single DB query
+    const [total, converted, aggregates] = await Promise.all([
       Contact.countDocuments(filter),
-      Contact.aggregate([{ $match: filter }, { $group: { _id: '$status', count: { $sum: 1 } } }]),
-      Contact.aggregate([{ $match: filter }, { $group: { _id: '$leadStatus', count: { $sum: 1 } } }]),
-      Contact.aggregate([{ $match: filter }, { $group: { _id: '$source', count: { $sum: 1 } } }]),
-      Contact.countDocuments({ ...filter, $or: [{ status: 'customer' }, { status: 'won' }, { leadStatus: 'Won' }] })
+      Contact.countDocuments({ ...filter, $or: [{ status: 'customer' }, { status: 'won' }, { leadStatus: 'Won' }] }),
+      Contact.aggregate([
+        { $match: filter },
+        { 
+          $facet: {
+            byStatus: [{ $group: { _id: '$status', count: { $sum: 1 } } }],
+            byLeadStatus: [{ $group: { _id: '$leadStatus', count: { $sum: 1 } } }],
+            bySource: [{ $group: { _id: '$source', count: { $sum: 1 } } }]
+          } 
+        }
+      ])
     ]);
 
+    const byStatus = aggregates[0]?.byStatus || [];
+    const byLeadStatus = aggregates[0]?.byLeadStatus || [];
+    const bySource = aggregates[0]?.bySource || [];
     const conversionRate = total > 0 ? Math.round((converted / total) * 100) : 0;
 
     res.status(200).json({
@@ -195,7 +217,8 @@ const getCallAnalytics = async (req, res) => {
       ? { $or: [{ userId: req.user._id }, { user: req.user._id }], ...dateFilter }
       : { ...dateFilter };
 
-    const [total, inbound, outbound, answered, missed, durationStats, byStatus] = await Promise.all([
+    // Optimized: Used $facet to combine duration stats and status stats
+    const [total, inbound, outbound, answered, missed, aggregates] = await Promise.all([
       Call.countDocuments(filter),
       Call.countDocuments({ ...filter, direction: 'inbound' }),
       Call.countDocuments({ ...filter, direction: 'outbound' }),
@@ -203,11 +226,17 @@ const getCallAnalytics = async (req, res) => {
       Call.countDocuments({ ...filter, status: 'missed' }),
       Call.aggregate([
         { $match: filter },
-        { $group: { _id: null, totalDuration: { $sum: '$duration' }, avgDuration: { $avg: '$duration' } } }
-      ]),
-      Call.aggregate([{ $match: filter }, { $group: { _id: '$status', count: { $sum: 1 } } }])
+        { 
+          $facet: {
+            durationStats: [{ $group: { _id: null, totalDuration: { $sum: '$duration' }, avgDuration: { $avg: '$duration' } } }],
+            byStatus: [{ $group: { _id: '$status', count: { $sum: 1 } } }]
+          } 
+        }
+      ])
     ]);
 
+    const durationStats = aggregates[0]?.durationStats || [];
+    const byStatus = aggregates[0]?.byStatus || [];
     const totalDuration = durationStats[0] ? durationStats[0].totalDuration : 0;
     const avgDuration = durationStats[0] ? Math.round(durationStats[0].avgDuration) : 0;
 

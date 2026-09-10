@@ -5,7 +5,7 @@ const User = require('../models/User');
 const Notification = require('../models/Notification');
 
 const isValidObjectId = (id) =>
-  mongoose.Types.ObjectId.isValid(id);
+  Boolean(id) && mongoose.Types.ObjectId.isValid(id);
 
 const VALID_STATUSES = [
   'Pending',
@@ -124,21 +124,32 @@ const safeAttendance = (attendance) => {
     return null;
   }
 
+  let safeUserObj = null;
+  if (attendance.user) {
+    if (typeof attendance.user === 'object' && attendance.user._id) {
+      let cleanAvatar = attendance.user.avatar || null;
+      if (typeof cleanAvatar === 'string' && cleanAvatar.startsWith('data:image') && cleanAvatar.length > 1000) {
+        cleanAvatar = null;
+      }
+
+      safeUserObj = {
+        id: attendance.user._id,
+        _id: attendance.user._id,
+        name: attendance.user.name || '',
+        email: attendance.user.email || '',
+        role: attendance.user.role || '',
+        avatar: cleanAvatar
+      };
+    } else {
+      safeUserObj = attendance.user;
+    }
+  }
+
   return {
     id: attendance._id,
+    _id: attendance._id,
 
-    user: attendance.user
-      ? typeof attendance.user === 'object' &&
-        attendance.user._id
-        ? {
-            id: attendance.user._id,
-            name: attendance.user.name,
-            email: attendance.user.email,
-            role: attendance.user.role,
-            avatar: attendance.user.avatar || null
-          }
-        : attendance.user
-      : null,
+    user: safeUserObj,
 
     date: attendance.date,
 
@@ -219,10 +230,6 @@ const createTodayAttendanceForUser = async (user) => {
     end
   } = getDayRange(now);
 
-  // ----------------------------------------------------------
-  // CHECK EXISTING RECORD
-  // ----------------------------------------------------------
-
   const existing = await Attendance.findOne({
     user: user._id,
     date: {
@@ -234,10 +241,6 @@ const createTodayAttendanceForUser = async (user) => {
   if (existing) {
     return existing;
   }
-
-  // ----------------------------------------------------------
-  // CREATE SCHEDULED TIME
-  // ----------------------------------------------------------
 
   const scheduledTime = createScheduledDate(
     now,
@@ -252,10 +255,6 @@ const createTodayAttendanceForUser = async (user) => {
 
     return null;
   }
-
-  // ----------------------------------------------------------
-  // GRACE PERIOD / WINDOW CALCULATION
-  // ----------------------------------------------------------
 
   let windowStart = createScheduledDate(now, windowStartStr);
   let windowEnd = createScheduledDate(now, windowEndStr);
@@ -276,10 +275,6 @@ const createTodayAttendanceForUser = async (user) => {
     (parseTimeToMinutes(scheduleTime) + DEFAULT_GRACE_PERIOD);
 
   const initialStatus = currentPktMins > winEndMins ? 'Absent' : 'Pending';
-
-  // ----------------------------------------------------------
-  // CREATE RECORD
-  // ----------------------------------------------------------
 
   try {
     const attendance = await Attendance.create({
@@ -310,10 +305,6 @@ const createTodayAttendanceForUser = async (user) => {
 
     return attendance;
   } catch (error) {
-    // --------------------------------------------------------
-    // DUPLICATE RECORD CREATED BY ANOTHER REQUEST
-    // --------------------------------------------------------
-
     if (error.code === 11000) {
       return await Attendance.findOne({
         user: user._id,
@@ -347,7 +338,7 @@ const createAttendanceNotification = async (
     attendance.user
   ).select(
     'name email attendanceSettings attendanceSchedule preferences workSchedule'
-  );
+  ).lean();
 
   if (!user) {
     return null;
@@ -429,7 +420,7 @@ const processAttendanceNotifications =
         status: 'Active',
       }).select(
         '_id name email role status attendanceSettings attendanceSchedule preferences workSchedule'
-      );
+      ).lean();
 
       let created = 0;
       let notified = 0;
@@ -451,7 +442,6 @@ const processAttendanceNotifications =
               }
             });
 
-          // Create record if not found
           if (!attendance) {
             attendance =
               await createTodayAttendanceForUser(
@@ -467,12 +457,10 @@ const processAttendanceNotifications =
             continue;
           }
 
-          // If already marked present, checkout, leave, etc., ignore
           if (attendance.status === 'Present' || attendance.checkIn) {
             continue;
           }
 
-          // Calculate window in minutes
           const schedule =
             user.attendanceSchedule ||
             user.preferences?.attendanceSchedule ||
@@ -485,7 +473,6 @@ const processAttendanceNotifications =
           const winStartMins = parseTimeToMinutes(wStartStr) || 0;
           const winEndMins = parseTimeToMinutes(wEndStr) || 1440;
 
-          // If current time is before window, ensure status is Pending
           if (currentPktMins < winStartMins) {
             if (attendance.status === 'Absent') {
               attendance.status = 'Pending';
@@ -495,7 +482,6 @@ const processAttendanceNotifications =
             continue;
           }
 
-          // If current time is inside window
           if (currentPktMins >= winStartMins && currentPktMins <= winEndMins) {
             if (attendance.status !== 'Pending') {
               attendance.status = 'Pending';
@@ -510,7 +496,6 @@ const processAttendanceNotifications =
             continue;
           }
 
-          // If current time is after window, only then mark Absent
           if (currentPktMins > winEndMins && attendance.status === 'Pending') {
             attendance.status = 'Absent';
             attendance.markedAt = now;
@@ -557,9 +542,6 @@ const processAttendanceNotifications =
 // ============================================================
 // ADMIN: SET USER ATTENDANCE SCHEDULE
 // ============================================================
-
-// PUT /api/attendance/user/:userId/schedule
-// PUT /api/users/:id/attendance-schedule
 
 const setUserAttendanceSchedule =
   async (req, res) => {
@@ -652,7 +634,6 @@ const setUserAttendanceSchedule =
 
       await user.save();
 
-      // Reset today's attendance record immediately based on new window
       const now = new Date();
       const { start, end } = getDayRange(now);
 
@@ -723,9 +704,6 @@ const setUserAttendanceSchedule =
 // ADMIN: GET USER ATTENDANCE SCHEDULE
 // ============================================================
 
-// GET /api/attendance/user/:userId/schedule
-// GET /api/users/:id/attendance-schedule
-
 const getUserAttendanceSchedule =
   async (req, res) => {
     try {
@@ -745,7 +723,7 @@ const getUserAttendanceSchedule =
           userId
         ).select(
           'name email role status attendanceSettings attendanceSchedule preferences workSchedule'
-        );
+        ).lean();
 
       if (!user) {
         return res.status(404).json({
@@ -771,6 +749,7 @@ const getUserAttendanceSchedule =
 
         user: {
           id: user._id,
+          _id: user._id,
           name: user.name,
           email: user.email,
           role: user.role,
@@ -810,17 +789,12 @@ const getUserAttendanceSchedule =
 // USER: MARK ATTENDANCE (WITH GPS GEOFENCING VALIDATION)
 // ============================================================
 
-// POST /api/attendance/mark
-
 const markAttendance =
   async (req, res) => {
     try {
       const userId =
         req.user._id;
 
-      // ------------------------------------------------------
-      // GPS GEOFENCING VALIDATION
-      // ------------------------------------------------------
       const officeLat = Number(process.env.OFFICE_LATITUDE);
       const officeLng = Number(process.env.OFFICE_LONGITUDE);
       const maxRadius = Number(process.env.OFFICE_RADIUS_METERS) || 100;
@@ -983,7 +957,7 @@ const markAttendance =
         ).populate(
           'user',
           'name email role avatar'
-        );
+        ).lean();
 
       const result =
         safeAttendance(
@@ -1013,8 +987,6 @@ const markAttendance =
 // USER: CHECK IN
 // ============================================================
 
-// POST /api/attendance/check-in
-
 const checkIn =
   async (req, res) => {
     return markAttendance(req, res);
@@ -1023,8 +995,6 @@ const checkIn =
 // ============================================================
 // USER: CHECK OUT
 // ============================================================
-
-// POST /api/attendance/check-out
 
 const checkOut =
   async (req, res) => {
@@ -1095,7 +1065,7 @@ const checkOut =
         ).populate(
           'user',
           'name email role avatar'
-        );
+        ).lean();
 
       const result =
         safeAttendance(
@@ -1124,8 +1094,6 @@ const checkOut =
 // ============================================================
 // USER: GET MY ATTENDANCE
 // ============================================================
-
-// GET /api/attendance/my
 
 const getMyAttendance =
   async (req, res) => {
@@ -1212,7 +1180,8 @@ const getMyAttendance =
             .sort({
               date: -1,
               createdAt: -1
-            }),
+            })
+            .lean(),
 
           Attendance.countDocuments(
             filter
@@ -1256,8 +1225,6 @@ const getMyAttendance =
 // USER: GET TODAY ATTENDANCE
 // ============================================================
 
-// GET /api/attendance/today
-
 const getTodayAttendance =
   async (req, res) => {
     try {
@@ -1283,9 +1250,8 @@ const getTodayAttendance =
         }).populate(
           'user',
           'name email role avatar'
-        );
+        ).lean();
 
-      // Create record if not found
       if (!attendance) {
         const user =
           await User.findById(
@@ -1298,18 +1264,18 @@ const getTodayAttendance =
           user &&
           user.status === 'Active'
         ) {
-          attendance = await createTodayAttendanceForUser(
+          const createdAtt = await createTodayAttendanceForUser(
             user
           );
 
-          if (attendance) {
+          if (createdAtt) {
             attendance =
               await Attendance.findById(
-                attendance._id
+                createdAtt._id
               ).populate(
                 'user',
                 'name email role avatar'
-              );
+              ).lean();
           }
         }
       }
@@ -1349,8 +1315,6 @@ const getTodayAttendance =
 // ============================================================
 // ATTENDANCE SUMMARY
 // ============================================================
-
-// GET /api/attendance/summary
 
 const getAttendanceSummary =
   async (req, res) => {
@@ -1451,8 +1415,6 @@ const getAttendanceSummary =
 // ADMIN / MANAGER: GET ATTENDANCE LIST
 // ============================================================
 
-// GET /api/attendance
-
 const getAttendanceList =
   async (req, res) => {
     try {
@@ -1485,7 +1447,7 @@ const getAttendanceList =
               {
                 name: {
                   $regex:
-                    search.trim(),
+                    search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
                   $options:
                     'i'
                 }
@@ -1493,7 +1455,7 @@ const getAttendanceList =
               {
                 email: {
                   $regex:
-                    search.trim(),
+                    search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
                   $options:
                     'i'
                 }
@@ -1501,7 +1463,7 @@ const getAttendanceList =
             ]
           }).select(
             '_id'
-          );
+          ).lean();
 
         const userIds =
           matchingUsers.map(
@@ -1569,7 +1531,8 @@ const getAttendanceList =
             .sort({
               date: -1,
               createdAt: -1
-            }),
+            })
+            .lean(),
 
           Attendance.countDocuments(
             filter
@@ -1613,8 +1576,6 @@ const getAttendanceList =
 // GET SINGLE ATTENDANCE
 // ============================================================
 
-// GET /api/attendance/:id
-
 const getAttendanceById =
   async (req, res) => {
     try {
@@ -1635,7 +1596,7 @@ const getAttendanceById =
         ).populate(
           'user',
           'name email role avatar'
-        );
+        ).lean();
 
       if (!attendance) {
         return res.status(404).json({
@@ -1682,8 +1643,6 @@ const getAttendanceById =
 // ADMIN: CREATE MANUAL ATTENDANCE
 // ============================================================
 
-// POST /api/attendance
-
 const createManualAttendance =
   async (req, res) => {
     try {
@@ -1713,7 +1672,7 @@ const createManualAttendance =
       const userExists =
         await User.findById(
           targetUserId
-        );
+        ).select('_id').lean();
 
       if (!userExists) {
         return res.status(404).json({
@@ -1747,7 +1706,7 @@ const createManualAttendance =
             $gte: start,
             $lte: end
           }
-        });
+        }).select('_id').lean();
 
       if (existing) {
         return res.status(400).json({
@@ -1788,7 +1747,7 @@ const createManualAttendance =
         ).populate(
           'user',
           'name email role avatar'
-        );
+        ).lean();
 
       const result =
         safeAttendance(
@@ -1826,8 +1785,6 @@ const createManualAttendance =
 // ============================================================
 // ADMIN: UPDATE ATTENDANCE
 // ============================================================
-
-// PUT/PATCH /api/attendance/:id
 
 const updateAttendance =
   async (req, res) => {
@@ -1980,7 +1937,7 @@ const updateAttendance =
         ).populate(
           'user',
           'name email role avatar'
-        );
+        ).lean();
 
       const result =
         safeAttendance(
@@ -2010,8 +1967,6 @@ const updateAttendance =
 // ADMIN: DELETE ATTENDANCE
 // ============================================================
 
-// DELETE /api/attendance/:id
-
 const deleteAttendance =
   async (req, res) => {
     try {
@@ -2029,7 +1984,7 @@ const deleteAttendance =
       const attendance =
         await Attendance.findById(
           req.params.id
-        );
+        ).select('notificationId').lean();
 
       if (!attendance) {
         return res.status(404).json({

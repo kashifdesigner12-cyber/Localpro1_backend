@@ -6,8 +6,6 @@ const User = require('../models/User');
 const { createNotification } = require('./notificationController');
 
 // Optional services.
-// These services are not currently present in the project, so the controller
-// must not crash when the backend starts.
 let emailService = null;
 let socketService = null;
 
@@ -27,19 +25,25 @@ try {
   }
 }
 
-const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
+const isValidObjectId = (id) =>
+  Boolean(id) && mongoose.Types.ObjectId.isValid(id);
 
-// Safe user ref
+// Safe user ref without heavy Base64 payload
 const safeUserRef = (u) => {
   if (!u) return null;
 
   if (typeof u === 'object' && u._id) {
+    let cleanAvatar = u.avatar || null;
+    if (typeof cleanAvatar === 'string' && cleanAvatar.startsWith('data:image') && cleanAvatar.length > 1000) {
+      cleanAvatar = null;
+    }
+
     return {
       id: u._id,
       _id: u._id,
-      name: u.name,
-      email: u.email,
-      avatar: u.avatar || null
+      name: u.name || '',
+      email: u.email || '',
+      avatar: cleanAvatar
     };
   }
 
@@ -202,7 +206,8 @@ const getEmails = async (req, res) => {
     }
 
     if (search && search.trim()) {
-      const regex = new RegExp(search.trim(), 'i');
+      const escaped = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
 
       filter.$and = filter.$and || [];
 
@@ -249,6 +254,7 @@ const getEmails = async (req, res) => {
     const [emails, total] =
       await Promise.all([
         Email.find(filter)
+          .select('-html')
           .populate(
             'userId',
             'name email role avatar'
@@ -263,7 +269,8 @@ const getEmails = async (req, res) => {
           )
           .sort(sortOption)
           .skip(skip)
-          .limit(limitNum),
+          .limit(limitNum)
+          .lean(),
 
         Email.countDocuments(filter)
       ]);
@@ -271,7 +278,7 @@ const getEmails = async (req, res) => {
     const formatted =
       emails.map(safeEmail);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       emails: formatted,
       data: formatted,
@@ -289,7 +296,7 @@ const getEmails = async (req, res) => {
       error
     );
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message:
         'Server error retrieving emails.'
@@ -364,7 +371,7 @@ const getEmailStats = async (req, res) => {
       byStatus
     };
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       stats,
       data: stats
@@ -375,7 +382,7 @@ const getEmailStats = async (req, res) => {
       error
     );
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message:
         'Server error retrieving email stats.'
@@ -409,7 +416,8 @@ const getEmail = async (req, res) => {
         .populate(
           'contact',
           'name firstName lastName email phone company'
-        );
+        )
+        .lean();
 
     if (!email) {
       return res.status(404).json({
@@ -450,7 +458,7 @@ const getEmail = async (req, res) => {
     const formatted =
       safeEmail(email);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       email: formatted,
       data: formatted
@@ -461,7 +469,7 @@ const getEmail = async (req, res) => {
       error
     );
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message:
         'Server error retrieving email.'
@@ -539,10 +547,6 @@ const sendEmail = async (req, res) => {
       });
     }
 
-    // ==========================================
-    // Optional real email service
-    // ==========================================
-
     let sendResult = null;
 
     if (
@@ -572,10 +576,6 @@ const sendEmail = async (req, res) => {
         'Email service is not configured. Email will be stored in MongoDB only.'
       );
     }
-
-    // ==========================================
-    // Save email to database
-    // ==========================================
 
     const email =
       await Email.create({
@@ -623,10 +623,6 @@ const sendEmail = async (req, res) => {
           new Date()
       });
 
-    // ==========================================
-    // Update conversation
-    // ==========================================
-
     if (conversationId) {
       try {
         await Conversation.findByIdAndUpdate(
@@ -650,10 +646,6 @@ const sendEmail = async (req, res) => {
       }
     }
 
-    // ==========================================
-    // Optional socket notification
-    // ==========================================
-
     if (
       socketService &&
       typeof socketService.emitToUser === 'function'
@@ -672,10 +664,6 @@ const sendEmail = async (req, res) => {
       }
     }
 
-    // ==========================================
-    // Populate response
-    // ==========================================
-
     const populated =
       await Email.findById(email._id)
         .populate(
@@ -689,12 +677,13 @@ const sendEmail = async (req, res) => {
         .populate(
           'contact',
           'name firstName lastName email phone company'
-        );
+        )
+        .lean();
 
     const formatted =
       safeEmail(populated);
 
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
       message:
         'Email sent successfully.',
@@ -707,7 +696,7 @@ const sendEmail = async (req, res) => {
       error
     );
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message:
         'Server error sending email.'
@@ -769,9 +758,9 @@ const markAsRead = async (req, res) => {
     await email.save();
 
     const formatted =
-      safeEmail(email);
+      safeEmail(email.toObject ? email.toObject() : email);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message:
         'Email marked as read.',
@@ -784,7 +773,7 @@ const markAsRead = async (req, res) => {
       error
     );
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message:
         'Server error marking email as read.'
@@ -807,7 +796,7 @@ const deleteEmail = async (req, res) => {
     }
 
     const email =
-      await Email.findById(req.params.id);
+      await Email.findById(req.params.id).select('userId user').lean();
 
     if (!email) {
       return res.status(404).json({
@@ -844,7 +833,7 @@ const deleteEmail = async (req, res) => {
       req.params.id
     );
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message:
         'Email deleted successfully.'
@@ -855,7 +844,7 @@ const deleteEmail = async (req, res) => {
       error
     );
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message:
         'Server error deleting email.'
@@ -901,12 +890,13 @@ const getEmailThread = async (req, res) => {
         )
         .sort({
           createdAt: 1
-        });
+        })
+        .lean();
 
     const formatted =
       emails.map(safeEmail);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       emails: formatted,
       data: formatted
@@ -917,7 +907,7 @@ const getEmailThread = async (req, res) => {
       error
     );
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message:
         'Server error retrieving email thread.'

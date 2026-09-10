@@ -13,7 +13,7 @@ const {
 // ============================================================================
 
 const isValidObjectId = (id) =>
-  mongoose.Types.ObjectId.isValid(id);
+  Boolean(id) && mongoose.Types.ObjectId.isValid(id);
 
 // ============================================================================
 // SAFE USER
@@ -26,6 +26,12 @@ const safeUserRef = (user) => {
     typeof user === "object" &&
     user._id
   ) {
+    let cleanAvatar = user.avatar || "";
+    // Base64 massive image string filter to prevent payload bloating
+    if (typeof cleanAvatar === "string" && cleanAvatar.startsWith("data:image") && cleanAvatar.length > 1000) {
+      cleanAvatar = "";
+    }
+
     return {
       id: user._id,
       _id: user._id,
@@ -34,7 +40,7 @@ const safeUserRef = (user) => {
       phone: user.phone || "",
       role: user.role || "",
       status: user.status || "",
-      avatar: user.avatar || "",
+      avatar: cleanAvatar,
     };
   }
 
@@ -271,7 +277,8 @@ const populateConversation = (
     .populate(
       "lastSender",
       "name email phone role status avatar"
-    );
+    )
+    .lean();
 };
 
 // ============================================================================
@@ -291,12 +298,12 @@ const populateMessage = (
     .populate(
       "recipient",
       "name email phone role status avatar"
-    );
+    )
+    .lean();
 };
 
 // ============================================================================
 // GET AVAILABLE CONTACTS
-// IMPORTANT
 // ============================================================================
 
 const getAvailableContacts = async (
@@ -312,10 +319,6 @@ const getAvailableContacts = async (
 
   let roles = [];
 
-  /*
-   * ADMIN
-   * Can contact managers and users.
-   */
   if (
     req.user.role === "admin"
   ) {
@@ -323,38 +326,21 @@ const getAvailableContacts = async (
       "manager",
       "user",
     ];
-  }
-
-  /*
-   * MANAGER
-   * Can contact users and other managers.
-   */
-  else if (
+  } else if (
     req.user.role === "manager"
   ) {
     roles = [
       "user",
       "manager",
     ];
-  }
-
-  /*
-   * USER
-   * Can contact admin and managers.
-   */
-  else if (
+  } else if (
     req.user.role === "user"
   ) {
     roles = [
       "admin",
       "manager",
     ];
-  }
-
-  /*
-   * Unknown role.
-   */
-  else {
+  } else {
     return [];
   }
 
@@ -367,13 +353,6 @@ const getAvailableContacts = async (
       $in: roles,
     },
 
-    /*
-     * Support both common status formats.
-     *
-     * We intentionally don't require status="Active"
-     * because your User model may use a different
-     * default/status value.
-     */
     $or: [
       {
         status: {
@@ -391,9 +370,6 @@ const getAvailableContacts = async (
     ],
   };
 
-  /*
-   * Search contacts.
-   */
   if (
     search &&
     search.trim()
@@ -478,14 +454,14 @@ const getConversations = async (
 
     const pageNum = Math.max(
       1,
-      parseInt(page) || 1
+      parseInt(page, 10) || 1
     );
 
     const limitNum = Math.min(
       100,
       Math.max(
         1,
-        parseInt(limit) || 100
+        parseInt(limit, 10) || 100
       )
     );
 
@@ -496,10 +472,7 @@ const getConversations = async (
     const currentUserId =
       req.user._id;
 
-    // ========================================================================
-    // CONVERSATION FILTER
-    // ========================================================================
-
+    // Filter
     let conversationFilter = {};
 
     if (
@@ -523,12 +496,9 @@ const getConversations = async (
       };
     }
 
-    // ========================================================================
-    // CONVERSATIONS
-    // ========================================================================
-
-    const conversations =
-      await Conversation.find(
+    // Parallel fetch conversations, total count, and contacts
+    const [conversations, total, contacts] = await Promise.all([
+      Conversation.find(
         conversationFilter
       )
         .populate(
@@ -544,126 +514,76 @@ const getConversations = async (
           updatedAt: -1,
         })
         .skip(skip)
-        .limit(limitNum);
+        .limit(limitNum)
+        .lean(),
 
-    // ========================================================================
-    // SEARCH EXISTING CONVERSATIONS
-    // ========================================================================
-
-    let filteredConversations =
-      conversations;
-
-    if (
-      search &&
-      search.trim()
-    ) {
-      const searchTerm =
-        search
-          .trim()
-          .toLowerCase();
-
-      filteredConversations =
-        conversations.filter(
-          (conversation) => {
-            const participants =
-              Array.isArray(
-                conversation.participants
-              )
-                ? conversation.participants
-                : [];
-
-            return participants.some(
-              (participant) => {
-                const name =
-                  (
-                    participant?.name ||
-                    ""
-                  ).toLowerCase();
-
-                const email =
-                  (
-                    participant?.email ||
-                    ""
-                  ).toLowerCase();
-
-                const phone =
-                  (
-                    participant?.phone ||
-                    ""
-                  ).toLowerCase();
-
-                const role =
-                  (
-                    participant?.role ||
-                    ""
-                  ).toLowerCase();
-
-                return (
-                  name.includes(
-                    searchTerm
-                  ) ||
-                  email.includes(
-                    searchTerm
-                  ) ||
-                  phone.includes(
-                    searchTerm
-                  ) ||
-                  role.includes(
-                    searchTerm
-                  )
-                );
-              }
-            );
-          }
-        );
-    }
-
-    // ========================================================================
-    // TOTAL
-    // ========================================================================
-
-    const total =
-      await Conversation.countDocuments(
+      Conversation.countDocuments(
         conversationFilter
-      );
+      ),
 
-    // ========================================================================
-    // FORMAT CONVERSATIONS
-    // ========================================================================
-
-    const formattedConversations =
-      await Promise.all(
-        filteredConversations.map(
-          async (
-            conversation
-          ) => {
-            const unreadCount =
-              await getUnreadCount(
-                conversation._id,
-                currentUserId
-              );
-
-            return safeConversation(
-              conversation,
-              unreadCount
-            );
-          }
-        )
-      );
-
-    // ========================================================================
-    // AVAILABLE CONTACTS
-    // ========================================================================
-
-    const contacts =
-      await getAvailableContacts(
+      getAvailableContacts(
         req,
         search
-      );
+      ),
+    ]);
 
-    // ========================================================================
-    // RESPONSE
-    // ========================================================================
+    // Search filter if provided
+    let filteredConversations = conversations;
+
+    if (search && search.trim()) {
+      const searchTerm = search.trim().toLowerCase();
+
+      filteredConversations = conversations.filter((conversation) => {
+        const participants = Array.isArray(conversation.participants)
+          ? conversation.participants
+          : [];
+
+        return participants.some((participant) => {
+          const name = (participant?.name || "").toLowerCase();
+          const email = (participant?.email || "").toLowerCase();
+          const phone = (participant?.phone || "").toLowerCase();
+          const role = (participant?.role || "").toLowerCase();
+
+          return (
+            name.includes(searchTerm) ||
+            email.includes(searchTerm) ||
+            phone.includes(searchTerm) ||
+            role.includes(searchTerm)
+          );
+        });
+      });
+    }
+
+    // Single aggregation query for unread counts instead of N+1 loop queries
+    const conversationIds = filteredConversations.map((c) => c._id);
+    const unreadCountsMap = {};
+
+    if (conversationIds.length > 0) {
+      const unreadAgg = await Message.aggregate([
+        {
+          $match: {
+            conversation: { $in: conversationIds },
+            recipient: currentUserId,
+            isRead: false,
+          },
+        },
+        {
+          $group: {
+            _id: "$conversation",
+            count: { $sum: 1 },
+          },
+        },
+      ]);
+
+      unreadAgg.forEach((item) => {
+        unreadCountsMap[String(item._id)] = item.count;
+      });
+    }
+
+    const formattedConversations = filteredConversations.map((conversation) => {
+      const unreadCount = unreadCountsMap[String(conversation._id)] || 0;
+      return safeConversation(conversation, unreadCount);
+    });
 
     return res.status(200).json({
       success: true,
@@ -737,10 +657,10 @@ const getConversation = async (
       });
     }
 
-    const conversation =
-      await populateConversation(
-        id
-      );
+    const [conversation, unreadCount] = await Promise.all([
+      populateConversation(id),
+      getUnreadCount(id, req.user._id),
+    ]);
 
     if (!conversation) {
       return res.status(404).json({
@@ -762,12 +682,6 @@ const getConversation = async (
           "Access denied.",
       });
     }
-
-    const unreadCount =
-      await getUnreadCount(
-        conversation._id,
-        req.user._id
-      );
 
     const formatted =
       safeConversation(
@@ -852,7 +766,7 @@ const createConversation = async (
         targetUserId
       ).select(
         "_id name email phone role status avatar"
-      );
+      ).lean();
 
     if (!recipientUser) {
       return res.status(404).json({
@@ -874,10 +788,7 @@ const createConversation = async (
       });
     }
 
-    // ========================================================================
-    // ROLE RULES
-    // ========================================================================
-
+    // Role rules
     if (
       req.user.role ===
       "manager"
@@ -938,10 +849,6 @@ const createConversation = async (
       }
     }
 
-    // ========================================================================
-    // FIND EXISTING
-    // ========================================================================
-
     let conversation =
       await Conversation.findOne({
         participants: {
@@ -952,19 +859,13 @@ const createConversation = async (
 
           $size: 2,
         },
-      });
+      }).lean();
 
     if (conversation) {
-      const populated =
-        await populateConversation(
-          conversation._id
-        );
-
-      const unreadCount =
-        await getUnreadCount(
-          conversation._id,
-          req.user._id
-        );
+      const [populated, unreadCount] = await Promise.all([
+        populateConversation(conversation._id),
+        getUnreadCount(conversation._id, req.user._id),
+      ]);
 
       const formatted =
         safeConversation(
@@ -983,11 +884,8 @@ const createConversation = async (
       });
     }
 
-    // ========================================================================
-    // CREATE
-    // ========================================================================
-
-    conversation =
+    // Create
+    const createdConv =
       await Conversation.create({
         participants: [
           req.user._id,
@@ -1009,7 +907,7 @@ const createConversation = async (
 
     const populated =
       await populateConversation(
-        conversation._id
+        createdConv._id
       );
 
     const formatted =
@@ -1077,7 +975,7 @@ const getConversationMessages =
       const conversation =
         await Conversation.findById(
           id
-        );
+        ).select("participants userId user").lean();
 
       if (!conversation) {
         return res.status(404).json({
@@ -1102,14 +1000,14 @@ const getConversationMessages =
 
       const pageNum = Math.max(
         1,
-        parseInt(page) || 1
+        parseInt(page, 10) || 1
       );
 
       const limitNum = Math.min(
         100,
         Math.max(
           1,
-          parseInt(limit) || 100
+          parseInt(limit, 10) || 100
         )
       );
 
@@ -1136,7 +1034,8 @@ const getConversationMessages =
             createdAt: 1,
           })
           .skip(skip)
-          .limit(limitNum),
+          .limit(limitNum)
+          .lean(),
 
         Message.countDocuments({
           conversation: id,
@@ -1306,7 +1205,7 @@ const sendConversationMessage =
           recipientId
         ).select(
           "_id name email phone role status avatar"
-        );
+        ).lean();
 
       if (!recipient) {
         return res.status(404).json({
@@ -1391,10 +1290,7 @@ const sendConversationMessage =
 
       await conversation.save();
 
-      // ======================================================================
-      // NOTIFICATION
-      // ======================================================================
-
+      // In-app Notification
       try {
         await createNotification({
           userId:
@@ -1581,16 +1477,10 @@ const updateConversation =
 
       await conversation.save();
 
-      const populated =
-        await populateConversation(
-          conversation._id
-        );
-
-      const unreadCount =
-        await getUnreadCount(
-          conversation._id,
-          req.user._id
-        );
+      const [populated, unreadCount] = await Promise.all([
+        populateConversation(conversation._id),
+        getUnreadCount(conversation._id, req.user._id),
+      ]);
 
       const formatted =
         safeConversation(
@@ -1682,21 +1572,15 @@ const markAsRead = async (
       isRead: false,
     };
 
-    const unreadBefore =
-      await Message.countDocuments(
-        unreadFilter
-      );
-
-    const result =
-      await Message.updateMany(
-        unreadFilter,
-        {
-          $set: {
-            isRead: true,
-            readAt: new Date(),
-          },
-        }
-      );
+    const [unreadBefore, result] = await Promise.all([
+      Message.countDocuments(unreadFilter),
+      Message.updateMany(unreadFilter, {
+        $set: {
+          isRead: true,
+          readAt: new Date(),
+        },
+      }),
+    ]);
 
     const modifiedCount =
       Number(
@@ -1945,7 +1829,7 @@ const deleteConversation =
       const conversation =
         await Conversation.findById(
           id
-        );
+        ).select("participants userId user").lean();
 
       if (!conversation) {
         return res.status(404).json({
@@ -1968,13 +1852,10 @@ const deleteConversation =
         });
       }
 
-      await Message.deleteMany({
-        conversation: id,
-      });
-
-      await Conversation.findByIdAndDelete(
-        id
-      );
+      await Promise.all([
+        Message.deleteMany({ conversation: id }),
+        Conversation.findByIdAndDelete(id),
+      ]);
 
       return res.status(200).json({
         success: true,
@@ -2049,7 +1930,8 @@ const getThread = async (
         )
         .sort({
           createdAt: 1,
-        });
+        })
+        .lean();
 
     return res.status(200).json({
       success: true,

@@ -1,50 +1,86 @@
-const mongoose = require("mongoose");
+const Activity = require("../models/Activity");
 
-const activitySchema = new mongoose.Schema(
-  {
-    user: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-      required: true,
-      index: true,
-    },
+// ============================================================
+// GET MY ACTIVITIES
+// ============================================================
 
-    type: {
-      type: String,
-      enum: [
-        "task",
-        "message",
-        "calendar",
-        "profile",
-      ],
-      required: true,
-    },
+const getMyActivities = async (req, res) => {
+  try {
+    // --------------------------------------------------------
+    // Pagination
+    // --------------------------------------------------------
 
-    title: {
-      type: String,
-      required: true,
-      trim: true,
-    },
+    const page = Math.max(
+      Number.parseInt(req.query.page, 10) || 1,
+      1
+    );
 
-    description: {
-      type: String,
-      default: "",
-      trim: true,
-    },
+    const requestedLimit =
+      Number.parseInt(req.query.limit, 10) || 30;
 
-    metadata: {
-      type: mongoose.Schema.Types.Mixed,
-      default: {},
-    },
-  },
-  {
-    timestamps: true,
+    // Keep Activity responses small.
+    const limit = Math.min(
+      Math.max(requestedLimit, 1),
+      50
+    );
+
+    const skip = (page - 1) * limit;
+
+    // --------------------------------------------------------
+    // Fetch activities
+    // --------------------------------------------------------
+    //
+    // We intentionally exclude "metadata".
+    //
+    // metadata is Mixed and can contain large objects,
+    // request data, response data, IDs, etc.
+    //
+    // This is especially important because the previous
+    // Activity response was around 11 MB.
+    //
+    // --------------------------------------------------------
+
+    const activities = await Activity.find({
+      user: req.user._id,
+    })
+      .select(
+        "_id user type title description createdAt"
+      )
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    // --------------------------------------------------------
+    // Response
+    // --------------------------------------------------------
+
+    return res.status(200).json({
+      success: true,
+      activities,
+      pagination: {
+        page,
+        limit,
+        hasMore: activities.length === limit,
+      },
+    });
+  } catch (error) {
+    console.error(
+      "Get my activities error:",
+      error.message
+    );
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch activities",
+    });
   }
-);
+};
 
-activitySchema.index({
-  user: 1,
-  createdAt: -1,
-});
+// ============================================================
+// EXPORT
+// ============================================================
 
-module.exports = mongoose.model("Activity", activitySchema);
+module.exports = {
+  getMyActivities,
+};

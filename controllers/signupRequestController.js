@@ -7,13 +7,14 @@ const VALID_STATUSES = ["Pending", "Approved", "Rejected"];
 const VALID_ROLES = ["user", "admin", "manager"];
 
 const isValidObjectId = (id) =>
-  mongoose.Types.ObjectId.isValid(id);
+  Boolean(id) && mongoose.Types.ObjectId.isValid(id);
 
 const safeRequest = (request) => {
   if (!request) return null;
 
   return {
     id: request._id,
+    _id: request._id,
     name: request.name,
     email: request.email,
     phone: request.phone || "",
@@ -24,6 +25,7 @@ const safeRequest = (request) => {
       ? typeof request.reviewedBy === "object" && request.reviewedBy._id
         ? {
             id: request.reviewedBy._id,
+            _id: request.reviewedBy._id,
             name: request.reviewedBy.name,
             email: request.reviewedBy.email,
             role: request.reviewedBy.role,
@@ -39,14 +41,20 @@ const safeRequest = (request) => {
 const safeUser = (user) => {
   if (!user) return null;
 
+  let cleanAvatar = user.avatar || null;
+  if (typeof cleanAvatar === "string" && cleanAvatar.startsWith("data:image") && cleanAvatar.length > 1000) {
+    cleanAvatar = null;
+  }
+
   return {
     id: user._id,
+    _id: user._id,
     name: user.name,
     email: user.email,
     phone: user.phone || "",
     role: user.role,
     status: user.status,
-    avatar: user.avatar || null,
+    avatar: cleanAvatar,
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
   };
@@ -133,9 +141,10 @@ const createSignupRequest = async (req, res) => {
       });
     }
 
-    const existingUser = await User.findOne({
-      email: emailNorm,
-    });
+    const [existingUser, existingRequest] = await Promise.all([
+      User.findOne({ email: emailNorm }).select("_id").lean(),
+      SignupRequest.findOne({ email: emailNorm, status: "Pending" }).select("_id").lean()
+    ]);
 
     if (existingUser) {
       return res.status(400).json({
@@ -143,11 +152,6 @@ const createSignupRequest = async (req, res) => {
         message: "An account with this email already exists.",
       });
     }
-
-    const existingRequest = await SignupRequest.findOne({
-      email: emailNorm,
-      status: "Pending",
-    });
 
     if (existingRequest) {
       return res.status(400).json({
@@ -218,7 +222,8 @@ const getSignupRequests = async (req, res) => {
     const filter = {};
 
     if (search && search.trim()) {
-      const regex = new RegExp(search.trim(), "i");
+      const escaped = search.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const regex = new RegExp(escaped, "i");
 
       filter.$or = [
         { name: regex },
@@ -255,7 +260,8 @@ const getSignupRequests = async (req, res) => {
         .populate("reviewedBy", "name email role")
         .skip(skip)
         .limit(limitNum)
-        .sort(sortOption),
+        .sort(sortOption)
+        .lean(),
 
       SignupRequest.countDocuments(filter),
     ]);
@@ -294,7 +300,8 @@ const getSignupRequestById = async (req, res) => {
 
     const request = await SignupRequest.findById(id)
       .select("-password")
-      .populate("reviewedBy", "name email role");
+      .populate("reviewedBy", "name email role")
+      .lean();
 
     if (!request) {
       return res.status(404).json({
@@ -329,9 +336,7 @@ const approveSignupRequest = async (req, res) => {
       });
     }
 
-    const request = await SignupRequest.findById(id).select(
-      "+password"
-    );
+    const request = await SignupRequest.findById(id).select("+password");
 
     if (!request) {
       return res.status(404).json({
@@ -349,7 +354,7 @@ const approveSignupRequest = async (req, res) => {
 
     const existingUser = await User.findOne({
       email: request.email,
-    });
+    }).select("_id").lean();
 
     if (existingUser) {
       return res.status(400).json({
@@ -385,30 +390,30 @@ const approveSignupRequest = async (req, res) => {
 
     await request.save();
 
-    try {
-      await createNotification({
-        userId: insertResult.insertedId,
-        type: "system",
-        title: "Account Approved",
-        message:
-          "Your account signup request has been approved. Welcome to Local Pro 1!",
-        relatedId: insertResult.insertedId,
-        relatedType: "User",
-      });
-    } catch (notificationError) {
-      console.error(
-        "Notification creation error:",
-        notificationError
-      );
-    }
+    // Fire notification non-blocking
+    (async () => {
+      try {
+        await createNotification({
+          userId: insertResult.insertedId,
+          type: "system",
+          title: "Account Approved",
+          message:
+            "Your account signup request has been approved. Welcome to Local Pro 1!",
+          relatedId: insertResult.insertedId,
+          relatedType: "User",
+        });
+      } catch (notificationError) {
+        console.error(
+          "Notification creation error:",
+          notificationError
+        );
+      }
+    })();
 
-    const createdUser = await User.findById(
-      insertResult.insertedId
-    ).select("-password");
-
-    const populatedRequest = await SignupRequest.findById(
-      request._id
-    ).populate("reviewedBy", "name email role");
+    const [createdUser, populatedRequest] = await Promise.all([
+      User.findById(insertResult.insertedId).select("-password").lean(),
+      SignupRequest.findById(request._id).populate("reviewedBy", "name email role").lean()
+    ]);
 
     return res.status(200).json({
       success: true,
@@ -448,9 +453,7 @@ const rejectSignupRequest = async (req, res) => {
     const { reason, rejectionReason } = req.body;
     const reasonText = reason || rejectionReason || "";
 
-    const request = await SignupRequest.findById(id).select(
-      "-password"
-    );
+    const request = await SignupRequest.findById(id).select("-password");
 
     if (!request) {
       return res.status(404).json({
@@ -475,9 +478,9 @@ const rejectSignupRequest = async (req, res) => {
 
     await request.save();
 
-    const populatedRequest = await SignupRequest.findById(
-      request._id
-    ).populate("reviewedBy", "name email role");
+    const populatedRequest = await SignupRequest.findById(request._id)
+      .populate("reviewedBy", "name email role")
+      .lean();
 
     return res.status(200).json({
       success: true,
@@ -506,7 +509,7 @@ const deleteSignupRequest = async (req, res) => {
       });
     }
 
-    const request = await SignupRequest.findById(id);
+    const request = await SignupRequest.findById(id).select("_id").lean();
 
     if (!request) {
       return res.status(404).json({

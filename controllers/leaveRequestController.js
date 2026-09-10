@@ -3,7 +3,8 @@ const LeaveRequest = require('../models/LeaveRequest');
 const User = require('../models/User');
 const { createNotification } = require('./notificationController');
 
-const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
+const isValidObjectId = (id) =>
+  Boolean(id) && mongoose.Types.ObjectId.isValid(id);
 
 const VALID_LEAVE_TYPES = [
   'Annual',
@@ -26,16 +27,6 @@ const VALID_STATUSES = [
 /*
 |--------------------------------------------------------------------------
 | Leave Type Normalizer
-|--------------------------------------------------------------------------
-| Frontend may send:
-| "Annual Leave"
-| "Sick Leave"
-| etc.
-|
-| Backend stores only:
-| "Annual"
-| "Sick"
-| etc.
 |--------------------------------------------------------------------------
 */
 
@@ -91,20 +82,47 @@ const safeLeaveRequest = (lr) => {
     return null;
   }
 
+  let safeUserObj = null;
+  if (lr.user) {
+    if (typeof lr.user === 'object' && lr.user._id) {
+      let cleanAvatar = lr.user.avatar || null;
+      if (typeof cleanAvatar === 'string' && cleanAvatar.startsWith('data:image') && cleanAvatar.length > 1000) {
+        cleanAvatar = null;
+      }
+
+      safeUserObj = {
+        id: lr.user._id,
+        _id: lr.user._id,
+        name: lr.user.name || undefined,
+        email: lr.user.email || undefined,
+        role: lr.user.role || undefined,
+        avatar: cleanAvatar
+      };
+    } else {
+      safeUserObj = lr.user;
+    }
+  }
+
+  let safeReviewerObj = null;
+  if (lr.reviewedBy) {
+    if (typeof lr.reviewedBy === 'object' && lr.reviewedBy._id) {
+      safeReviewerObj = {
+        id: lr.reviewedBy._id,
+        _id: lr.reviewedBy._id,
+        name: lr.reviewedBy.name || undefined,
+        email: lr.reviewedBy.email || undefined,
+        role: lr.reviewedBy.role || undefined
+      };
+    } else {
+      safeReviewerObj = lr.reviewedBy;
+    }
+  }
+
   return {
     id: lr._id,
+    _id: lr._id,
 
-    user: lr.user
-      ? typeof lr.user === 'object' && lr.user._id
-        ? {
-            id: lr.user._id,
-            name: lr.user.name || undefined,
-            email: lr.user.email || undefined,
-            role: lr.user.role || undefined,
-            avatar: lr.user.avatar || null
-          }
-        : lr.user
-      : null,
+    user: safeUserObj,
 
     leaveType: lr.leaveType,
 
@@ -115,16 +133,7 @@ const safeLeaveRequest = (lr) => {
 
     status: lr.status,
 
-    reviewedBy: lr.reviewedBy
-      ? typeof lr.reviewedBy === 'object' && lr.reviewedBy._id
-        ? {
-            id: lr.reviewedBy._id,
-            name: lr.reviewedBy.name || undefined,
-            email: lr.reviewedBy.email || undefined,
-            role: lr.reviewedBy.role || undefined
-          }
-        : lr.reviewedBy
-      : null,
+    reviewedBy: safeReviewerObj,
 
     reviewedAt: lr.reviewedAt || null,
 
@@ -165,10 +174,6 @@ const createLeaveRequest = async (req, res) => {
       });
     }
 
-    /*
-     * Normalize frontend value:
-     * "Annual Leave" -> "Annual"
-     */
     const normalizedLeaveType =
       normalizeLeaveType(leaveType);
 
@@ -244,48 +249,48 @@ const createLeaveRequest = async (req, res) => {
         .populate(
           'reviewedBy',
           'name email role'
+        )
+        .lean();
+
+    // Fast parallel notifications dispatch
+    (async () => {
+      try {
+        const admins = await User.find({
+          role: { $in: ['admin', 'manager'] }
+        }).select('_id').lean();
+
+        await Promise.allSettled(
+          admins.map((admin) =>
+            createNotification({
+              userId: admin._id,
+              type: 'leave',
+              title: 'New Leave Request',
+              message: `${
+                req.user.name || 'An employee'
+              } submitted a ${normalizedLeaveType} leave request.`,
+              relatedId: leaveRequest._id,
+              relatedType: 'LeaveRequest',
+              actionUrl: '/dashboard/leave-requests'
+            })
+          )
         );
-
-    /*
-     * Notify admins and managers.
-     */
-
-    try {
-      const admins =
-        await User.find({
-          role: {
-            $in: ['admin', 'manager']
-          }
-        }).select('_id');
-
-      for (const admin of admins) {
-        await createNotification({
-          userId: admin._id,
-          type: 'leave',
-          title: 'New Leave Request',
-          message: `${
-            req.user.name || 'An employee'
-          } submitted a ${normalizedLeaveType} leave request.`,
-          relatedId: leaveRequest._id,
-          relatedType: 'LeaveRequest',
-          actionUrl: '/dashboard/leave-requests'
-        });
+      } catch (notificationError) {
+        console.error(
+          'Notification dispatch error:',
+          notificationError.message
+        );
       }
-    } catch (notificationError) {
-      console.error(
-        'Notification dispatch error:',
-        notificationError.message
-      );
-    }
+    })();
+
+    const safeData = safeLeaveRequest(populated);
 
     return res.status(201).json({
       success: true,
       message:
         'Leave request submitted successfully.',
-      leaveRequest:
-        safeLeaveRequest(populated),
-      request:
-        safeLeaveRequest(populated)
+      leaveRequest: safeData,
+      request: safeData,
+      data: safeData
     });
   } catch (error) {
     console.error(
@@ -321,9 +326,6 @@ const getLeaveRequests = async (req, res) => {
 
     const filter = {};
 
-    /*
-     * Regular user can only see own requests.
-     */
     if (req.user.role === 'user') {
       filter.user = req.user._id;
     } else {
@@ -341,9 +343,6 @@ const getLeaveRequests = async (req, res) => {
       }
     }
 
-    /*
-     * Status filter
-     */
     if (status) {
       const normalizedStatus =
         VALID_STATUSES.find(
@@ -362,9 +361,6 @@ const getLeaveRequests = async (req, res) => {
       filter.status = normalizedStatus;
     }
 
-    /*
-     * Leave type filter
-     */
     if (leaveType) {
       const normalizedLeaveType =
         normalizeLeaveType(leaveType);
@@ -380,16 +376,9 @@ const getLeaveRequests = async (req, res) => {
         normalizedLeaveType;
     }
 
-    /*
-     * Search
-     */
     if (search && search.trim()) {
-      const regex = new RegExp(
-        search.trim(),
-        'i'
-      );
-
-      filter.reason = regex;
+      const escaped = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      filter.reason = new RegExp(escaped, 'i');
     }
 
     const pageNum = Math.max(
@@ -425,7 +414,8 @@ const getLeaveRequests = async (req, res) => {
         .limit(limitNum)
         .sort({
           createdAt: -1
-        }),
+        })
+        .lean(),
 
       LeaveRequest.countDocuments(
         filter
@@ -441,6 +431,7 @@ const getLeaveRequests = async (req, res) => {
       success: true,
       leaveRequests: safeRequests,
       requests: safeRequests,
+      data: safeRequests,
 
       pagination: {
         page: pageNum,
@@ -555,7 +546,8 @@ const getMyLeaveRequests = async (
         .limit(limitNum)
         .sort({
           createdAt: -1
-        }),
+        })
+        .lean(),
 
       LeaveRequest.countDocuments(
         filter
@@ -571,6 +563,7 @@ const getMyLeaveRequests = async (
       success: true,
       leaveRequests: safeRequests,
       requests: safeRequests,
+      data: safeRequests,
 
       pagination: {
         page: pageNum,
@@ -626,7 +619,8 @@ const getLeaveRequestById = async (
         .populate(
           'reviewedBy',
           'name email role'
-        );
+        )
+        .lean();
 
     if (!leaveRequest) {
       return res.status(404).json({
@@ -638,6 +632,7 @@ const getLeaveRequestById = async (
 
     if (
       req.user.role === 'user' &&
+      leaveRequest.user &&
       leaveRequest.user._id.toString() !==
         req.user._id.toString()
     ) {
@@ -648,16 +643,13 @@ const getLeaveRequestById = async (
       });
     }
 
+    const safeData = safeLeaveRequest(leaveRequest);
+
     return res.status(200).json({
       success: true,
-      leaveRequest:
-        safeLeaveRequest(
-          leaveRequest
-        ),
-      request:
-        safeLeaveRequest(
-          leaveRequest
-        )
+      leaveRequest: safeData,
+      request: safeData,
+      data: safeData
     });
   } catch (error) {
     console.error(
@@ -741,9 +733,6 @@ const updateLeaveRequest = async (
       reason
     } = req.body;
 
-    /*
-     * Leave type
-     */
     if (leaveType !== undefined) {
       const normalizedLeaveType =
         normalizeLeaveType(
@@ -767,9 +756,6 @@ const updateLeaveRequest = async (
     let end =
       leaveRequest.endDate;
 
-    /*
-     * Start date
-     */
     if (startDate !== undefined) {
       start = new Date(startDate);
 
@@ -789,9 +775,6 @@ const updateLeaveRequest = async (
         start;
     }
 
-    /*
-     * End date
-     */
     if (endDate !== undefined) {
       end = new Date(endDate);
 
@@ -823,9 +806,6 @@ const updateLeaveRequest = async (
       });
     }
 
-    /*
-     * Reason
-     */
     if (reason !== undefined) {
       if (
         !reason ||
@@ -855,7 +835,8 @@ const updateLeaveRequest = async (
         .populate(
           'reviewedBy',
           'name email role'
-        );
+        )
+        .lean();
 
     const safe =
       safeLeaveRequest(
@@ -954,20 +935,18 @@ const cancelLeaveRequest = async (
         .populate(
           'reviewedBy',
           'name email role'
-        );
+        )
+        .lean();
+
+    const safeData = safeLeaveRequest(populated);
 
     return res.status(200).json({
       success: true,
       message:
         'Leave request cancelled successfully.',
-      leaveRequest:
-        safeLeaveRequest(
-          populated
-        ),
-      request:
-        safeLeaveRequest(
-          populated
-        )
+      leaveRequest: safeData,
+      request: safeData,
+      data: safeData
     });
   } catch (error) {
     console.error(
@@ -1066,7 +1045,8 @@ const approveLeaveRequest = async (
         .populate(
           'reviewedBy',
           'name email role'
-        );
+        )
+        .lean();
 
     try {
       const notifMessage =
@@ -1100,18 +1080,15 @@ const approveLeaveRequest = async (
       );
     }
 
+    const safeData = safeLeaveRequest(populated);
+
     return res.status(200).json({
       success: true,
       message:
         'Leave request approved successfully.',
-      leaveRequest:
-        safeLeaveRequest(
-          populated
-        ),
-      request:
-        safeLeaveRequest(
-          populated
-        )
+      leaveRequest: safeData,
+      request: safeData,
+      data: safeData
     });
   } catch (error) {
     console.error(
@@ -1217,7 +1194,8 @@ const rejectLeaveRequest = async (
         .populate(
           'reviewedBy',
           'name email role'
-        );
+        )
+        .lean();
 
     try {
       const notifMessage =
@@ -1251,18 +1229,15 @@ const rejectLeaveRequest = async (
       );
     }
 
+    const safeData = safeLeaveRequest(populated);
+
     return res.status(200).json({
       success: true,
       message:
         'Leave request rejected successfully.',
-      leaveRequest:
-        safeLeaveRequest(
-          populated
-        ),
-      request:
-        safeLeaveRequest(
-          populated
-        )
+      leaveRequest: safeData,
+      request: safeData,
+      data: safeData
     });
   } catch (error) {
     console.error(
@@ -1300,7 +1275,7 @@ const deleteLeaveRequest = async (
     }
 
     const leaveRequest =
-      await LeaveRequest.findById(id);
+      await LeaveRequest.findById(id).select('user').lean();
 
     if (!leaveRequest) {
       return res.status(404).json({

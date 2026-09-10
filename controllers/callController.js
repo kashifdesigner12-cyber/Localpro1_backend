@@ -4,7 +4,8 @@ const Contact = require('../models/Contact');
 const User = require('../models/User');
 const { createNotification } = require('./notificationController');
 
-const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
+const isValidObjectId = (id) =>
+  Boolean(id) && mongoose.Types.ObjectId.isValid(id);
 
 const VALID_DIRECTIONS = ['inbound', 'outbound'];
 const VALID_STATUSES = [
@@ -21,18 +22,23 @@ const VALID_STATUSES = [
   'voicemail'
 ];
 
-// Helper to format safe user reference
+// Helper to format safe user reference without heavy Base64 payload
 const safeUserRef = (u) => {
   if (!u) return null;
   if (typeof u === 'object' && u._id) {
+    let cleanAvatar = u.avatar || null;
+    if (typeof cleanAvatar === 'string' && cleanAvatar.startsWith('data:image') && cleanAvatar.length > 1000) {
+      cleanAvatar = null;
+    }
+
     return {
       id: u._id,
       _id: u._id,
-      name: u.name,
-      email: u.email,
+      name: u.name || '',
+      email: u.email || '',
       phone: u.phone !== undefined ? u.phone : undefined,
-      role: u.role,
-      avatar: u.avatar !== undefined ? u.avatar : null
+      role: u.role || '',
+      avatar: cleanAvatar
     };
   }
   return u;
@@ -113,7 +119,7 @@ const createCall = async (req, res) => {
     }
 
     if (targetContactId) {
-      const contactExists = await Contact.findById(targetContactId);
+      const contactExists = await Contact.findById(targetContactId).select('_id').lean();
       if (!contactExists) {
         return res.status(404).json({ success: false, message: 'Contact not found.' });
       }
@@ -150,7 +156,7 @@ const createCall = async (req, res) => {
       phoneNumber: resolvedPhone,
       direction: resolvedDirection,
       status: resolvedStatus,
-      duration: parseInt(duration) || 0,
+      duration: parseInt(duration, 10) || 0,
       notes: notes ? notes.trim() : '',
       recordingUrl: recordingUrl || '',
       startedAt: isNaN(parsedStart.getTime()) ? now : parsedStart,
@@ -160,29 +166,32 @@ const createCall = async (req, res) => {
 
     const populated = await Call.findById(callRecord._id)
       .populate('userId', 'name email role phone avatar')
-      .populate('contactId', 'name firstName lastName email phone company status');
+      .populate('contactId', 'name firstName lastName email phone company status')
+      .lean();
 
-    // Trigger notification if missed or incoming call
+    // Trigger notification non-blocking
     if (resolvedStatus === 'missed' || resolvedDirection === 'inbound') {
-      try {
-        await createNotification({
-          userId: req.user._id,
-          type: 'call',
-          title: resolvedStatus === 'missed' ? 'Missed Call' : 'Call Logged',
-          message: `${resolvedDirection === 'inbound' ? 'Inbound' : 'Outbound'} call ${resolvedPhone ? 'with ' + resolvedPhone : ''} (${resolvedStatus}).`,
-          relatedId: callRecord._id,
-          relatedType: 'Call',
-          actionUrl: '/dashboard/calls',
-          metadata: { callId: callRecord._id, status: resolvedStatus, direction: resolvedDirection }
-        });
-      } catch (notifErr) {
-        console.error('Call notification error:', notifErr.message);
-      }
+      (async () => {
+        try {
+          await createNotification({
+            userId: req.user._id,
+            type: 'call',
+            title: resolvedStatus === 'missed' ? 'Missed Call' : 'Call Logged',
+            message: `${resolvedDirection === 'inbound' ? 'Inbound' : 'Outbound'} call ${resolvedPhone ? 'with ' + resolvedPhone : ''} (${resolvedStatus}).`,
+            relatedId: callRecord._id,
+            relatedType: 'Call',
+            actionUrl: '/dashboard/calls',
+            metadata: { callId: callRecord._id, status: resolvedStatus, direction: resolvedDirection }
+          });
+        } catch (notifErr) {
+          console.error('Call notification error:', notifErr.message);
+        }
+      })();
     }
 
     const formatted = safeCall(populated);
 
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
       message: 'Call logged successfully.',
       call: formatted,
@@ -190,7 +199,7 @@ const createCall = async (req, res) => {
     });
   } catch (error) {
     console.error('createCall error:', error);
-    res.status(500).json({ success: false, message: 'Server error logging call.' });
+    return res.status(500).json({ success: false, message: 'Server error logging call.' });
   }
 };
 
@@ -216,7 +225,6 @@ const getCalls = async (req, res) => {
     const filter = {};
     const isAdminOrManager = req.user.role === 'admin' || req.user.role === 'manager';
 
-    // Scoping
     if (!isAdminOrManager) {
       filter.$or = [{ userId: req.user._id }, { user: req.user._id }];
     } else {
@@ -258,7 +266,6 @@ const getCalls = async (req, res) => {
       filter.$and.push({ $or: [{ contactId: targetContact }, { contact: targetContact }] });
     }
 
-    // Date range filter
     if (startDate || endDate) {
       filter.createdAt = {};
       if (startDate) {
@@ -271,9 +278,9 @@ const getCalls = async (req, res) => {
       }
     }
 
-    // Text search in phone, notes, from, to
     if (search && search.trim()) {
-      const regex = new RegExp(search.trim(), 'i');
+      const escaped = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
       filter.$and = filter.$and || [];
       filter.$and.push({
         $or: [
@@ -285,8 +292,8 @@ const getCalls = async (req, res) => {
       });
     }
 
-    const pageNum = Math.max(1, parseInt(page) || 1);
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 50));
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
     const skip = (pageNum - 1) * limitNum;
 
     let sortOption = { createdAt: -1 };
@@ -300,13 +307,14 @@ const getCalls = async (req, res) => {
         .populate('contactId', 'name firstName lastName email phone company status')
         .sort(sortOption)
         .skip(skip)
-        .limit(limitNum),
+        .limit(limitNum)
+        .lean(),
       Call.countDocuments(filter)
     ]);
 
     const formattedCalls = calls.map(safeCall);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       calls: formattedCalls,
       data: formattedCalls,
@@ -319,7 +327,7 @@ const getCalls = async (req, res) => {
     });
   } catch (error) {
     console.error('getCalls error:', error);
-    res.status(500).json({ success: false, message: 'Server error retrieving calls.' });
+    return res.status(500).json({ success: false, message: 'Server error retrieving calls.' });
   }
 };
 
@@ -380,14 +388,14 @@ const getCallStats = async (req, res) => {
       byStatus
     };
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       stats,
       data: stats
     });
   } catch (error) {
     console.error('getCallStats error:', error);
-    res.status(500).json({ success: false, message: 'Server error retrieving call stats.' });
+    return res.status(500).json({ success: false, message: 'Server error retrieving call stats.' });
   }
 };
 
@@ -400,7 +408,8 @@ const getCall = async (req, res) => {
 
     const call = await Call.findById(req.params.id)
       .populate('userId', 'name email role phone avatar')
-      .populate('contactId', 'name firstName lastName email phone company status');
+      .populate('contactId', 'name firstName lastName email phone company status')
+      .lean();
 
     if (!call) {
       return res.status(404).json({ success: false, message: 'Call not found.' });
@@ -419,14 +428,14 @@ const getCall = async (req, res) => {
 
     const formatted = safeCall(call);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       call: formatted,
       data: formatted
     });
   } catch (error) {
     console.error('getCall error:', error);
-    res.status(500).json({ success: false, message: 'Server error retrieving call.' });
+    return res.status(500).json({ success: false, message: 'Server error retrieving call.' });
   }
 };
 
@@ -475,7 +484,7 @@ const updateCall = async (req, res) => {
       call.status = status.toLowerCase();
     }
 
-    if (duration !== undefined) call.duration = parseInt(duration) || 0;
+    if (duration !== undefined) call.duration = parseInt(duration, 10) || 0;
     if (notes !== undefined) call.notes = notes ? notes.trim() : '';
     if (recordingUrl !== undefined) call.recordingUrl = recordingUrl;
 
@@ -511,11 +520,12 @@ const updateCall = async (req, res) => {
 
     const populated = await Call.findById(call._id)
       .populate('userId', 'name email role phone avatar')
-      .populate('contactId', 'name firstName lastName email phone company status');
+      .populate('contactId', 'name firstName lastName email phone company status')
+      .lean();
 
     const formatted = safeCall(populated);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: 'Call updated successfully.',
       call: formatted,
@@ -523,7 +533,7 @@ const updateCall = async (req, res) => {
     });
   } catch (error) {
     console.error('updateCall error:', error);
-    res.status(500).json({ success: false, message: 'Server error updating call.' });
+    return res.status(500).json({ success: false, message: 'Server error updating call.' });
   }
 };
 
@@ -534,7 +544,7 @@ const deleteCall = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid call ID.' });
     }
 
-    const call = await Call.findById(req.params.id);
+    const call = await Call.findById(req.params.id).select('userId user').lean();
     if (!call) {
       return res.status(404).json({ success: false, message: 'Call not found.' });
     }
@@ -552,13 +562,13 @@ const deleteCall = async (req, res) => {
 
     await Call.findByIdAndDelete(req.params.id);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: 'Call record deleted successfully.'
     });
   } catch (error) {
     console.error('deleteCall error:', error);
-    res.status(500).json({ success: false, message: 'Server error deleting call.' });
+    return res.status(500).json({ success: false, message: 'Server error deleting call.' });
   }
 };
 
@@ -596,7 +606,7 @@ const generateBrowserToken = async (req, res) => {
       }
     }
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       identity,
       token: token || 'mock_token_' + req.user._id,
@@ -604,7 +614,7 @@ const generateBrowserToken = async (req, res) => {
     });
   } catch (error) {
     console.error('generateBrowserToken error:', error);
-    res.status(500).json({ success: false, message: 'Server error generating call token.' });
+    return res.status(500).json({ success: false, message: 'Server error generating call token.' });
   }
 };
 

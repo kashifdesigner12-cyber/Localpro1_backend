@@ -4,7 +4,8 @@ const mongoose = require('mongoose');
 const Media = require('../models/Media');
 const storageService = require('../services/storageService');
 
-const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
+const isValidObjectId = (id) =>
+  Boolean(id) && mongoose.Types.ObjectId.isValid(id);
 
 const getFileType = (mimeType = '') => {
   if (mimeType.startsWith('image/')) return 'image';
@@ -14,10 +15,30 @@ const getFileType = (mimeType = '') => {
   return 'other';
 };
 
+const safeUserRef = (u) => {
+  if (!u) return null;
+  if (typeof u === 'object' && u._id) {
+    let cleanAvatar = u.avatar || null;
+    if (typeof cleanAvatar === 'string' && cleanAvatar.startsWith('data:image') && cleanAvatar.length > 1000) {
+      cleanAvatar = null;
+    }
+
+    return {
+      id: u._id,
+      _id: u._id,
+      name: u.name || '',
+      email: u.email || '',
+      avatar: cleanAvatar
+    };
+  }
+  return u;
+};
+
 const safeMedia = (m) => ({
   id: m._id,
   _id: m._id,
-  userId: m.userId || m.user,
+  userId: safeUserRef(m.userId || m.user),
+  user: safeUserRef(m.userId || m.user),
   filename: m.filename,
   originalName: m.originalName || m.filename,
   mimeType: m.mimeType,
@@ -25,7 +46,7 @@ const safeMedia = (m) => ({
   size: m.size,
   url: m.url,
   key: m.key,
-  isPublic: m.isPublic,
+  isPublic: Boolean(m.isPublic),
   metadata: m.metadata || {},
   createdAt: m.createdAt,
   updatedAt: m.updatedAt
@@ -40,7 +61,7 @@ const uploadFile = async (req, res) => {
     let fileSize = 0;
 
     if (req.file) {
-      fileBuffer = req.file.buffer || (req.file.path ? fs.readFileSync(req.file.path) : null);
+      fileBuffer = req.file.buffer || (req.file.path ? await fs.promises.readFile(req.file.path) : null);
       originalName = req.file.originalname || req.file.filename || originalName;
       mimeType = req.file.mimetype || mimeType;
       fileSize = req.file.size || (fileBuffer ? fileBuffer.length : 0);
@@ -82,9 +103,13 @@ const uploadFile = async (req, res) => {
       metadata: req.body.metadata || {}
     });
 
-    const formatted = safeMedia(mediaDoc);
+    const populated = await Media.findById(mediaDoc._id)
+      .populate('userId', 'name email avatar')
+      .lean();
 
-    res.status(201).json({
+    const formatted = safeMedia(populated || mediaDoc);
+
+    return res.status(201).json({
       success: true,
       message: 'File uploaded successfully.',
       file: formatted,
@@ -92,7 +117,7 @@ const uploadFile = async (req, res) => {
     });
   } catch (error) {
     console.error('uploadFile error:', error);
-    res.status(500).json({ success: false, message: 'Server error uploading file.' });
+    return res.status(500).json({ success: false, message: 'Server error uploading file.' });
   }
 };
 
@@ -110,12 +135,13 @@ const getFiles = async (req, res) => {
     if (fileType) filter.fileType = fileType.toLowerCase();
 
     if (search && search.trim()) {
-      const regex = new RegExp(search.trim(), 'i');
+      const escaped = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
       filter.$or = [{ originalName: regex }, { filename: regex }];
     }
 
-    const pageNum = Math.max(1, parseInt(page) || 1);
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 50));
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
     const skip = (pageNum - 1) * limitNum;
 
     const [files, total] = await Promise.all([
@@ -123,13 +149,14 @@ const getFiles = async (req, res) => {
         .populate('userId', 'name email avatar')
         .sort(sort === 'oldest' ? { createdAt: 1 } : { createdAt: -1 })
         .skip(skip)
-        .limit(limitNum),
+        .limit(limitNum)
+        .lean(),
       Media.countDocuments(filter)
     ]);
 
     const formatted = files.map(safeMedia);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       files: formatted,
       data: formatted,
@@ -142,7 +169,7 @@ const getFiles = async (req, res) => {
     });
   } catch (error) {
     console.error('getFiles error:', error);
-    res.status(500).json({ success: false, message: 'Server error retrieving files.' });
+    return res.status(500).json({ success: false, message: 'Server error retrieving files.' });
   }
 };
 
@@ -170,14 +197,14 @@ const getMediaStats = async (req, res) => {
 
     const totalBytes = sizeAgg[0] ? sizeAgg[0].totalBytes : 0;
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       stats: { totalFiles, totalBytes, byType },
       data: { totalFiles, totalBytes, byType }
     });
   } catch (error) {
     console.error('getMediaStats error:', error);
-    res.status(500).json({ success: false, message: 'Server error retrieving media stats.' });
+    return res.status(500).json({ success: false, message: 'Server error retrieving media stats.' });
   }
 };
 
@@ -188,7 +215,10 @@ const getFileById = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid file ID.' });
     }
 
-    const media = await Media.findById(req.params.id).populate('userId', 'name email avatar');
+    const media = await Media.findById(req.params.id)
+      .populate('userId', 'name email avatar')
+      .lean();
+
     if (!media) {
       return res.status(404).json({ success: false, message: 'File not found.' });
     }
@@ -203,14 +233,14 @@ const getFileById = async (req, res) => {
 
     const formatted = safeMedia(media);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       file: formatted,
       data: formatted
     });
   } catch (error) {
     console.error('getFileById error:', error);
-    res.status(500).json({ success: false, message: 'Server error retrieving file.' });
+    return res.status(500).json({ success: false, message: 'Server error retrieving file.' });
   }
 };
 
@@ -221,7 +251,7 @@ const deleteFile = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid file ID.' });
     }
 
-    const media = await Media.findById(req.params.id);
+    const media = await Media.findById(req.params.id).select('userId user key isPublic').lean();
     if (!media) {
       return res.status(404).json({ success: false, message: 'File not found.' });
     }
@@ -244,13 +274,13 @@ const deleteFile = async (req, res) => {
 
     await Media.findByIdAndDelete(req.params.id);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: 'File deleted successfully.'
     });
   } catch (error) {
     console.error('deleteFile error:', error);
-    res.status(500).json({ success: false, message: 'Server error deleting file.' });
+    return res.status(500).json({ success: false, message: 'Server error deleting file.' });
   }
 };
 

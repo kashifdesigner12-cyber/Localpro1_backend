@@ -5,21 +5,27 @@ const User = require('../models/User');
 const { createNotification } = require('./notificationController');
 const { sendMessageNotificationEmail } = require('../utils/sendEmail');
 
-const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
+const isValidObjectId = (id) =>
+  Boolean(id) && mongoose.Types.ObjectId.isValid(id);
 
-// Safe user ref helper
+// Safe user ref helper without heavy Base64 payload
 const safeUserRef = (u) => {
   if (!u) return null;
   if (typeof u === 'object' && u._id) {
+    let cleanAvatar = u.avatar || null;
+    if (typeof cleanAvatar === 'string' && cleanAvatar.startsWith('data:image') && cleanAvatar.length > 1000) {
+      cleanAvatar = null;
+    }
+
     return {
       id: u._id,
       _id: u._id,
-      name: u.name,
-      email: u.email,
+      name: u.name || '',
+      email: u.email || '',
       phone: u.phone !== undefined ? u.phone : undefined,
-      role: u.role,
+      role: u.role || '',
       status: u.status !== undefined ? u.status : undefined,
-      avatar: u.avatar !== undefined ? u.avatar : undefined
+      avatar: cleanAvatar
     };
   }
   return u;
@@ -27,6 +33,8 @@ const safeUserRef = (u) => {
 
 // Safe message response helper with delete support
 const safeMessage = (msg, currentUserId = null) => {
+  if (!msg) return null;
+
   const isDeletedForEveryone = Boolean(msg.isDeletedForEveryone);
   const deletedForList = Array.isArray(msg.deletedFor)
     ? msg.deletedFor.map((id) => id.toString())
@@ -53,8 +61,8 @@ const safeMessage = (msg, currentUserId = null) => {
       : Array.isArray(msg.attachments)
       ? msg.attachments
       : [],
-    isRead: msg.isRead,
-    readAt: msg.readAt,
+    isRead: Boolean(msg.isRead),
+    readAt: msg.readAt || null,
     isDeletedForEveryone: isDeletedForEveryone,
     isDeletedForMe: isDeletedForMe,
     deletedForEveryoneAt: msg.deletedForEveryoneAt || null,
@@ -87,7 +95,7 @@ const getMessages = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid conversation ID.' });
     }
 
-    const conversation = await Conversation.findById(conversationId);
+    const conversation = await Conversation.findById(conversationId).select('participants userId').lean();
     if (!conversation) {
       return res.status(404).json({ success: false, message: 'Conversation not found.' });
     }
@@ -105,11 +113,10 @@ const getMessages = async (req, res) => {
       });
     }
 
-    const pageNum = Math.max(1, parseInt(page) || 1);
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 50));
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
     const skip = (pageNum - 1) * limitNum;
 
-    // Filter out messages that the logged in user deleted for themselves
     const filter = {
       conversation: conversationId,
       deletedFor: { $ne: req.user._id }
@@ -122,13 +129,14 @@ const getMessages = async (req, res) => {
         .populate('deletedBy', 'name email role')
         .sort({ createdAt: 1 })
         .skip(skip)
-        .limit(limitNum),
+        .limit(limitNum)
+        .lean(),
       Message.countDocuments(filter)
     ]);
 
     const formattedMessages = messages.map((m) => safeMessage(m, req.user._id));
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       messages: formattedMessages,
       data: formattedMessages,
@@ -141,7 +149,7 @@ const getMessages = async (req, res) => {
     });
   } catch (error) {
     console.error('getMessages error:', error);
-    res.status(500).json({ success: false, message: 'Server error retrieving messages.' });
+    return res.status(500).json({ success: false, message: 'Server error retrieving messages.' });
   }
 };
 
@@ -157,13 +165,13 @@ const getMessageById = async (req, res) => {
     const message = await Message.findById(id)
       .populate('sender', 'name email role avatar')
       .populate('recipient', 'name email role avatar')
-      .populate('deletedBy', 'name email role');
+      .populate('deletedBy', 'name email role')
+      .lean();
 
     if (!message) {
       return res.status(404).json({ success: false, message: 'Message not found.' });
     }
 
-    // If deleted for this user
     if (
       Array.isArray(message.deletedFor) &&
       message.deletedFor.some((uid) => uid.toString() === req.user._id.toString())
@@ -184,14 +192,14 @@ const getMessageById = async (req, res) => {
 
     const formatted = safeMessage(message, req.user._id);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: formatted,
       data: formatted
     });
   } catch (error) {
     console.error('getMessageById error:', error);
-    res.status(500).json({ success: false, message: 'Server error retrieving message.' });
+    return res.status(500).json({ success: false, message: 'Server error retrieving message.' });
   }
 };
 
@@ -201,7 +209,6 @@ const sendMessage = async (req, res) => {
     const { conversationId, recipientId, to, body, message, content, messageType } = req.body;
     let rawAttachments = req.body.attachments;
 
-    // Parse attachments if sent as stringified JSON in multipart/form-data
     if (typeof rawAttachments === 'string') {
       try {
         rawAttachments = JSON.parse(rawAttachments);
@@ -212,7 +219,6 @@ const sendMessage = async (req, res) => {
 
     let parsedAttachments = Array.isArray(rawAttachments) ? [...rawAttachments] : [];
 
-    // Process files uploaded via Multer (req.files)
     if (req.files && Array.isArray(req.files) && req.files.length > 0) {
       const uploadedList = req.files.map((file) => ({
         url: `/uploads/${file.filename}`,
@@ -275,7 +281,7 @@ const sendMessage = async (req, res) => {
         return res.status(400).json({ success: false, message: 'Cannot send message to yourself.' });
       }
 
-      const targetUser = await User.findById(targetUserId);
+      const targetUser = await User.findById(targetUserId).select('_id').lean();
       if (!targetUser) {
         return res.status(404).json({ success: false, message: 'Recipient user not found.' });
       }
@@ -298,7 +304,6 @@ const sendMessage = async (req, res) => {
       });
     }
 
-    // Determine recipient
     let resolvedRecipientId = null;
     if (Array.isArray(conversation.participants)) {
       const other = conversation.participants.find(
@@ -308,8 +313,8 @@ const sendMessage = async (req, res) => {
     }
 
     const calculatedMessageType = messageType || determineMessageType(parsedAttachments, 'text');
-
     const now = new Date();
+
     const createdMessage = await Message.create({
       conversation: conversation._id,
       sender: req.user._id,
@@ -322,7 +327,6 @@ const sendMessage = async (req, res) => {
       readAt: null
     });
 
-    // Update conversation state preview
     const previewText = text.trim() || (calculatedMessageType === 'image' ? '📷 Photo' : '📎 Attachment');
     conversation.lastMessage = previewText;
     conversation.lastMessageType = calculatedMessageType;
@@ -330,54 +334,53 @@ const sendMessage = async (req, res) => {
     conversation.lastSender = req.user._id;
     await conversation.save();
 
+    // Fast non-blocking notifications & email dispatch
+    if (resolvedRecipientId && resolvedRecipientId.toString() !== req.user._id.toString()) {
+      (async () => {
+        try {
+          await createNotification({
+            userId: resolvedRecipientId,
+            type: 'message',
+            title: 'New Message',
+            message: `${req.user.name || 'A user'} sent you a message.`,
+            relatedId: conversation._id,
+            relatedType: 'Message',
+            actionUrl: userRole === 'admin' ? '/admin/conversations' : userRole === 'manager' ? '/manager/conversations' : '/user/conversations',
+            metadata: {
+              conversationId: conversation._id,
+              messageId: createdMessage._id,
+              senderId: req.user._id,
+              senderName: req.user.name
+            }
+          });
+        } catch (notifErr) {
+          console.error('Message notification error:', notifErr);
+        }
+
+        try {
+          const recipientUser = await User.findById(resolvedRecipientId).select('name email').lean();
+          if (recipientUser && recipientUser.email) {
+            await sendMessageNotificationEmail(
+              recipientUser.email,
+              recipientUser.name || 'User',
+              req.user.name || 'Admin',
+              previewText
+            );
+          }
+        } catch (emailErr) {
+          console.error('Message notification email failed:', emailErr.message);
+        }
+      })();
+    }
+
     const populated = await Message.findById(createdMessage._id)
       .populate('sender', 'name email role avatar')
-      .populate('recipient', 'name email role avatar');
-
-    // --------------------------------------------------------
-    // NOTIFICATION & EMAIL TO RECIPIENT
-    // --------------------------------------------------------
-    if (resolvedRecipientId && resolvedRecipientId.toString() !== req.user._id.toString()) {
-      // 1. In-App Notification
-      try {
-        await createNotification({
-          userId: resolvedRecipientId,
-          type: 'message',
-          title: 'New Message',
-          message: `${req.user.name || 'A user'} sent you a message.`,
-          relatedId: conversation._id,
-          relatedType: 'Message',
-          actionUrl: userRole === 'admin' ? '/admin/conversations' : userRole === 'manager' ? '/manager/conversations' : '/user/conversations',
-          metadata: {
-            conversationId: conversation._id,
-            messageId: createdMessage._id,
-            senderId: req.user._id,
-            senderName: req.user.name
-          }
-        });
-      } catch (notifErr) {
-        console.error('Message notification error:', notifErr);
-      }
-
-      // 2. Email Notification to Recipient
-      try {
-        const recipientUser = populated.recipient || (await User.findById(resolvedRecipientId).select('name email'));
-        if (recipientUser && recipientUser.email) {
-          await sendMessageNotificationEmail(
-            recipientUser.email,
-            recipientUser.name || 'User',
-            req.user.name || 'Admin',
-            previewText
-          );
-        }
-      } catch (emailErr) {
-        console.error('Message notification email failed:', emailErr.message);
-      }
-    }
+      .populate('recipient', 'name email role avatar')
+      .lean();
 
     const formattedMessage = safeMessage(populated, req.user._id);
 
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
       message: 'Message sent successfully.',
       data: formattedMessage,
@@ -385,7 +388,7 @@ const sendMessage = async (req, res) => {
     });
   } catch (error) {
     console.error('sendMessage error:', error);
-    res.status(500).json({ success: false, message: 'Server error sending message.' });
+    return res.status(500).json({ success: false, message: 'Server error sending message.' });
   }
 };
 
@@ -432,18 +435,19 @@ const updateMessage = async (req, res) => {
 
     const populated = await Message.findById(msg._id)
       .populate('sender', 'name email role avatar')
-      .populate('recipient', 'name email role avatar');
+      .populate('recipient', 'name email role avatar')
+      .lean();
 
     const formatted = safeMessage(populated, req.user._id);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: 'Message updated successfully.',
       data: formatted
     });
   } catch (error) {
     console.error('updateMessage error:', error);
-    res.status(500).json({ success: false, message: 'Server error updating message.' });
+    return res.status(500).json({ success: false, message: 'Server error updating message.' });
   }
 };
 
@@ -456,13 +460,13 @@ const getUnreadMessageCount = async (req, res) => {
       deletedFor: { $ne: req.user._id }
     });
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       unreadCount
     });
   } catch (error) {
     console.error('getUnreadMessageCount error:', error);
-    res.status(500).json({ success: false, message: 'Server error retrieving unread count.' });
+    return res.status(500).json({ success: false, message: 'Server error retrieving unread count.' });
   }
 };
 
@@ -475,7 +479,7 @@ const markMessagesAsRead = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid conversation ID.' });
     }
 
-    const conversation = await Conversation.findById(conversationId);
+    const conversation = await Conversation.findById(conversationId).select('participants userId').lean();
     if (!conversation) {
       return res.status(404).json({ success: false, message: 'Conversation not found.' });
     }
@@ -501,19 +505,21 @@ const markMessagesAsRead = async (req, res) => {
         isRead: false
       },
       {
-        isRead: true,
-        readAt: now
+        $set: {
+          isRead: true,
+          readAt: now
+        }
       }
     );
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: 'Messages marked as read.',
       modifiedCount: result.modifiedCount
     });
   } catch (error) {
     console.error('markMessagesAsRead error:', error);
-    res.status(500).json({ success: false, message: 'Server error marking messages as read.' });
+    return res.status(500).json({ success: false, message: 'Server error marking messages as read.' });
   }
 };
 
@@ -531,24 +537,27 @@ const markSingleMessageAsRead = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Message not found.' });
     }
 
-    message.isRead = true;
-    message.readAt = new Date();
-    await message.save();
+    if (!message.isRead) {
+      message.isRead = true;
+      message.readAt = new Date();
+      await message.save();
+    }
 
     const populated = await Message.findById(message._id)
       .populate('sender', 'name email role avatar')
-      .populate('recipient', 'name email role avatar');
+      .populate('recipient', 'name email role avatar')
+      .lean();
 
     const formatted = safeMessage(populated, req.user._id);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: 'Message marked as read.',
       data: formatted
     });
   } catch (error) {
     console.error('markSingleMessageAsRead error:', error);
-    res.status(500).json({ success: false, message: 'Server error marking message as read.' });
+    return res.status(500).json({ success: false, message: 'Server error marking message as read.' });
   }
 };
 
@@ -561,24 +570,23 @@ const deleteMessageForMe = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid message ID.' });
     }
 
-    const message = await Message.findById(id);
+    const message = await Message.findById(id).select('_id').lean();
     if (!message) {
       return res.status(404).json({ success: false, message: 'Message not found.' });
     }
 
-    // Add current user ID to deletedFor array
     await Message.findByIdAndUpdate(id, {
       $addToSet: { deletedFor: req.user._id }
     });
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: 'Message deleted for you successfully.',
       messageId: id
     });
   } catch (error) {
     console.error('deleteMessageForMe error:', error);
-    res.status(500).json({ success: false, message: 'Server error deleting message for you.' });
+    return res.status(500).json({ success: false, message: 'Server error deleting message for you.' });
   }
 };
 
@@ -599,7 +607,6 @@ const deleteMessageForEveryone = async (req, res) => {
     const userRole = String(req.user?.role || '').toLowerCase();
     const isSender = message.sender.toString() === req.user._id.toString();
 
-    // Sender, Admin, or Manager can delete for everyone
     if (!isSender && userRole !== 'admin' && userRole !== 'manager') {
       return res.status(403).json({
         success: false,
@@ -616,33 +623,31 @@ const deleteMessageForEveryone = async (req, res) => {
     await message.save();
 
     // Sync conversation lastMessage if this was the last message
-    const conversation = await Conversation.findById(message.conversation);
-    if (conversation && conversation.lastMessageAt && message.createdAt) {
-      if (new Date(conversation.lastMessageAt).getTime() === new Date(message.createdAt).getTime()) {
-        conversation.lastMessage = 'This message was deleted';
-        await conversation.save();
-      }
-    }
+    await Conversation.findOneAndUpdate(
+      { _id: message.conversation, lastMessageAt: message.createdAt },
+      { $set: { lastMessage: 'This message was deleted' } }
+    );
 
     const populated = await Message.findById(message._id)
       .populate('sender', 'name email role avatar')
       .populate('recipient', 'name email role avatar')
-      .populate('deletedBy', 'name email role');
+      .populate('deletedBy', 'name email role')
+      .lean();
 
     const formatted = safeMessage(populated, req.user._id);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: 'Message deleted for everyone successfully.',
       data: formatted
     });
   } catch (error) {
     console.error('deleteMessageForEveryone error:', error);
-    res.status(500).json({ success: false, message: 'Server error deleting message for everyone.' });
+    return res.status(500).json({ success: false, message: 'Server error deleting message for everyone.' });
   }
 };
 
-// DELETE /api/messages/:id (Supports deleteType: "me" | "everyone" | hard delete fallback)
+// DELETE /api/messages/:id
 const deleteMessage = async (req, res) => {
   try {
     const { id } = req.params;
@@ -652,17 +657,15 @@ const deleteMessage = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid message ID.' });
     }
 
-    // Branch to Delete For Me
     if (deleteType === 'me' || deleteType === 'for_me') {
       return deleteMessageForMe(req, res);
     }
 
-    // Branch to Delete For Everyone
     if (deleteType === 'everyone' || deleteType === 'for_everyone') {
       return deleteMessageForEveryone(req, res);
     }
 
-    const message = await Message.findById(id);
+    const message = await Message.findById(id).select('sender').lean();
     if (!message) {
       return res.status(404).json({ success: false, message: 'Message not found.' });
     }
@@ -670,16 +673,14 @@ const deleteMessage = async (req, res) => {
     const userRole = String(req.user?.role || '').toLowerCase();
     const isSender = message.sender.toString() === req.user._id.toString();
 
-    // If sender or admin/manager triggers standard delete, default to delete for everyone
     if (isSender || userRole === 'admin' || userRole === 'manager') {
       return deleteMessageForEveryone(req, res);
     }
 
-    // If recipient tries to delete, default to delete for me
     return deleteMessageForMe(req, res);
   } catch (error) {
     console.error('deleteMessage error:', error);
-    res.status(500).json({ success: false, message: 'Server error deleting message.' });
+    return res.status(500).json({ success: false, message: 'Server error deleting message.' });
   }
 };
 

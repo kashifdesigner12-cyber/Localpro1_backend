@@ -4,33 +4,49 @@ const { sendWelcomeEmail } = require("../utils/sendEmail");
 
 // ==========================================
 // Build Safe User Object
-// Includes schedule & preferences data
 // ==========================================
-const safeUser = (user) => ({
-  id: user._id,
-  _id: user._id,
-  name: user.name,
-  email: user.email,
-  phone: user.phone || "",
-  role: user.role,
-  status: user.status,
-  avatar: user.avatar || null,
-  business: user.business || {},
-  preferences: user.preferences || {},
-  attendanceSettings: user.attendanceSettings || {},
-  attendanceSchedule:
-    user.attendanceSchedule ||
-    user?.preferences?.attendanceSchedule ||
-    null,
-  workSchedule:
-    user.workSchedule ||
-    user?.preferences?.workSchedule ||
-    null,
-  notificationPreferences: user.notificationPreferences || {},
-  integrations: user.integrations || {},
-  createdAt: user.createdAt,
-  updatedAt: user.updatedAt,
-});
+const safeUser = (user) => {
+  if (!user) return null;
+
+  let cleanAvatar = user.avatar || null;
+  if (typeof cleanAvatar === "string" && cleanAvatar.startsWith("data:image") && cleanAvatar.length > 500) {
+    cleanAvatar = null;
+  }
+
+  return {
+    id: user._id,
+    _id: user._id,
+    name: user.name || "",
+    email: user.email || "",
+    phone: user.phone || "",
+    role: user.role || "user",
+    status: user.status || "Active",
+    avatar: cleanAvatar,
+
+    business: user.business || {},
+    preferences: user.preferences || {},
+
+    attendanceSettings: user.attendanceSettings || {},
+
+    attendanceSchedule:
+      user.attendanceSchedule ||
+      user?.preferences?.attendanceSchedule ||
+      null,
+
+    workSchedule:
+      user.workSchedule ||
+      user?.preferences?.workSchedule ||
+      null,
+
+    notificationPreferences:
+      user.notificationPreferences || {},
+
+    integrations: user.integrations || {},
+
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt,
+  };
+};
 
 // ==========================================
 // Generate JWT Token
@@ -66,7 +82,6 @@ const register = async (req, res) => {
   try {
     const { name, email, password, phone, role } = req.body;
 
-    // Validate required fields
     if (!name || !email || !password) {
       return res.status(400).json({
         success: false,
@@ -74,13 +89,11 @@ const register = async (req, res) => {
       });
     }
 
-    // Normalize email
     const emailNormalized = email.trim().toLowerCase();
 
-    // Check if user already exists
     const existingUser = await User.findOne({
       email: emailNormalized,
-    });
+    }).lean();
 
     if (existingUser) {
       return res.status(409).json({
@@ -89,7 +102,6 @@ const register = async (req, res) => {
       });
     }
 
-    // Create user
     const user = await User.create({
       name: name.trim(),
       email: emailNormalized,
@@ -98,22 +110,31 @@ const register = async (req, res) => {
       role: role || "user",
     });
 
-    // Send Welcome Email with credentials
     try {
-      await sendWelcomeEmail(user.email, user.name, password);
+      await sendWelcomeEmail(
+        user.email,
+        user.name,
+        password
+      );
     } catch (emailError) {
-      console.error("Failed to send welcome email:", emailError);
+      console.error(
+        "Failed to send welcome email:",
+        emailError
+      );
     }
+
+    const safeUserData = safeUser(user.toObject ? user.toObject() : user);
 
     return res.status(201).json({
       success: true,
-      message: "Registration successful. Credentials email sent to user.",
-      user: safeUser(user),
+      message:
+        "Registration successful. Credentials email sent to user.",
+      user: safeUserData,
+      data: safeUserData,
     });
   } catch (error) {
     console.error("Register error:", error);
 
-    // MongoDB duplicate key error
     if (error.code === 11000) {
       return res.status(409).json({
         success: false,
@@ -121,7 +142,6 @@ const register = async (req, res) => {
       });
     }
 
-    // Mongoose validation error
     if (error.name === "ValidationError") {
       const messages = Object.values(error.errors).map(
         (err) => err.message
@@ -148,7 +168,6 @@ const login = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    // Validate fields
     if (!email || !password) {
       return res.status(400).json({
         success: false,
@@ -156,17 +175,12 @@ const login = async (req, res) => {
       });
     }
 
-    // Normalize email
     const emailNormalized = email.trim().toLowerCase();
 
-    // Password is select:false in User model,
-    // so explicitly select it here.
     const user = await User.findOne({
       email: emailNormalized,
     }).select("+password");
 
-    // User not found
-    // This also covers permanently deleted users.
     if (!user) {
       return res.status(401).json({
         success: false,
@@ -174,7 +188,6 @@ const login = async (req, res) => {
       });
     }
 
-    // Extra protection for soft-deleted users
     if (user.isDeleted === true) {
       return res.status(401).json({
         success: false,
@@ -182,7 +195,6 @@ const login = async (req, res) => {
       });
     }
 
-    // Check account status
     if (user.status === "Pending") {
       return res.status(403).json({
         success: false,
@@ -196,11 +208,11 @@ const login = async (req, res) => {
     ) {
       return res.status(403).json({
         success: false,
-        message: "Your account has been deactivated or blocked.",
+        message:
+          "Your account has been deactivated or blocked.",
       });
     }
 
-    // Check isActive flag
     if (user.isActive === false) {
       return res.status(403).json({
         success: false,
@@ -208,7 +220,6 @@ const login = async (req, res) => {
       });
     }
 
-    // Compare password
     const isMatch = await user.comparePassword(password);
 
     if (!isMatch) {
@@ -218,17 +229,18 @@ const login = async (req, res) => {
       });
     }
 
-    // Generate JWT
     const token = generateToken(user._id, user.role);
 
-    // Store JWT inside HttpOnly cookie
     res.cookie("token", token, getCookieOptions());
+
+    const safeUserData = safeUser(user);
 
     return res.status(200).json({
       success: true,
       message: "Login successful.",
       token,
-      user: safeUser(user),
+      user: safeUserData,
+      data: safeUserData,
     });
   } catch (error) {
     console.error("Login error:", error);
@@ -242,18 +254,19 @@ const login = async (req, res) => {
 
 // ==========================================
 // GET /api/auth/me
-// Get Current Logged-in User
+// Get Current Logged-in User (Optimized: Excludes avatar blob completely)
 // ==========================================
 const getMe = async (req, res) => {
   try {
-    if (!req.user) {
+    if (!req.user || !req.user._id) {
       return res.status(401).json({
         success: false,
         message: "Not authenticated.",
       });
     }
 
-    const user = await User.findById(req.user._id);
+    // .select("-avatar") ensures heavy base64 strings are never fetched from DB
+    const user = await User.findById(req.user._id).select("-avatar").lean();
 
     if (!user) {
       return res.status(404).json({
@@ -262,15 +275,9 @@ const getMe = async (req, res) => {
       });
     }
 
-    // Prevent deleted/deactivated users from continuing
-    if (user.isDeleted === true || user.isActive === false) {
-      return res.status(401).json({
-        success: false,
-        message: "Your account is no longer active.",
-      });
-    }
-
     if (
+      user.isDeleted === true ||
+      user.isActive === false ||
       user.status === "Blocked" ||
       user.status === "Inactive"
     ) {
@@ -280,10 +287,12 @@ const getMe = async (req, res) => {
       });
     }
 
+    const safeUserData = safeUser(user);
+
     return res.status(200).json({
       success: true,
-      user: safeUser(user),
-      data: safeUser(user),
+      user: safeUserData,
+      data: safeUserData,
     });
   } catch (error) {
     console.error("Get me error:", error);
@@ -321,7 +330,6 @@ const updateProfile = async (req, res) => {
       });
     }
 
-    // Update basic info
     if (name !== undefined) {
       if (!name || !name.trim()) {
         return res.status(400).json({
@@ -341,7 +349,6 @@ const updateProfile = async (req, res) => {
       user.avatar = avatar;
     }
 
-    // Update preferences
     if (
       preferences !== undefined &&
       typeof preferences === "object"
@@ -352,7 +359,6 @@ const updateProfile = async (req, res) => {
       };
     }
 
-    // Update attendance schedule
     if (attendanceSchedule !== undefined) {
       user.attendanceSchedule = attendanceSchedule;
 
@@ -362,7 +368,6 @@ const updateProfile = async (req, res) => {
       };
     }
 
-    // Update work schedule
     if (workSchedule !== undefined) {
       user.workSchedule = workSchedule;
 
@@ -372,7 +377,6 @@ const updateProfile = async (req, res) => {
       };
     }
 
-    // Update attendance settings
     if (
       attendanceSettings !== undefined &&
       typeof attendanceSettings === "object"
@@ -455,7 +459,10 @@ const changePassword = async (req, res) => {
       });
     }
 
-    if (user.isDeleted === true || user.isActive === false) {
+    if (
+      user.isDeleted === true ||
+      user.isActive === false
+    ) {
       return res.status(403).json({
         success: false,
         message: "Your account is no longer active.",

@@ -3,22 +3,28 @@ const Event = require('../models/Event');
 const User = require('../models/User');
 const { createNotification } = require('./notificationController');
 
-const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
+const isValidObjectId = (id) =>
+  Boolean(id) && mongoose.Types.ObjectId.isValid(id);
 
 const VALID_EVENT_TYPES = ['meeting', 'task', 'reminder', 'call', 'holiday', 'appointment', 'other'];
 const VALID_EVENT_STATUSES = ['scheduled', 'completed', 'cancelled'];
 
-// Helper to format safe user reference
+// Helper to format safe user reference without heavy Base64 payload
 const safeUserRef = (u) => {
   if (!u) return null;
   if (typeof u === 'object' && u._id) {
+    let cleanAvatar = u.avatar || null;
+    if (typeof cleanAvatar === 'string' && cleanAvatar.startsWith('data:image') && cleanAvatar.length > 1000) {
+      cleanAvatar = null;
+    }
+
     return {
       id: u._id,
       _id: u._id,
-      name: u.name,
-      email: u.email,
-      role: u.role,
-      avatar: u.avatar !== undefined ? u.avatar : null
+      name: u.name || '',
+      email: u.email || '',
+      role: u.role || '',
+      avatar: cleanAvatar
     };
   }
   return u;
@@ -146,7 +152,7 @@ const createEvent = async (req, res) => {
       if (!isValidObjectId(assignedTo)) {
         return res.status(400).json({ success: false, message: 'Invalid assignedTo user ID.' });
       }
-      const userExists = await User.findById(assignedTo);
+      const userExists = await User.findById(assignedTo).select('_id').lean();
       if (!userExists) {
         return res.status(404).json({ success: false, message: 'Assigned user not found.' });
       }
@@ -196,9 +202,10 @@ const createEvent = async (req, res) => {
       .populate('assignedTo', 'name email role avatar')
       .populate('participants', 'name email role avatar')
       .populate('attendees', 'name email role avatar')
-      .populate('contact', 'name firstName lastName email phone company');
+      .populate('contact', 'name firstName lastName email phone company')
+      .lean();
 
-    // Send notifications to assignee and participants
+    // Fast non-blocking notifications
     const notifyTargets = new Set();
     if (validAssignee && validAssignee.toString() !== req.user._id.toString()) {
       notifyTargets.add(validAssignee.toString());
@@ -209,26 +216,28 @@ const createEvent = async (req, res) => {
       }
     }
 
-    for (const targetId of notifyTargets) {
-      try {
-        await createNotification({
-          userId: targetId,
-          type: 'event',
-          title: 'Event/Appointment Invitation',
-          message: `You were added to "${event.title}".`,
-          relatedId: event._id,
-          relatedType: 'Event',
-          actionUrl: '/dashboard/calendar',
-          metadata: { eventId: event._id, title: event.title, startDate: event.startDate }
-        });
-      } catch (notifErr) {
-        console.error('Event notification error:', notifErr.message);
-      }
+    if (notifyTargets.size > 0) {
+      (async () => {
+        await Promise.allSettled(
+          Array.from(notifyTargets).map((targetId) =>
+            createNotification({
+              userId: targetId,
+              type: 'event',
+              title: 'Event/Appointment Invitation',
+              message: `You were added to "${event.title}".`,
+              relatedId: event._id,
+              relatedType: 'Event',
+              actionUrl: '/dashboard/calendar',
+              metadata: { eventId: event._id, title: event.title, startDate: event.startDate }
+            })
+          )
+        );
+      })().catch((err) => console.error('Event notification error:', err.message));
     }
 
     const formattedEvent = safeEvent(populated);
 
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
       message: 'Event created successfully.',
       event: formattedEvent,
@@ -237,7 +246,7 @@ const createEvent = async (req, res) => {
     });
   } catch (error) {
     console.error('createEvent error:', error);
-    res.status(500).json({ success: false, message: 'Server error creating event.' });
+    return res.status(500).json({ success: false, message: 'Server error creating event.' });
   }
 };
 
@@ -291,8 +300,8 @@ const getEvents = async (req, res) => {
         if (!isNaN(end.getTime())) filter.startDate.$lte = end;
       }
     } else if (month && year) {
-      const monthNum = parseInt(month) - 1;
-      const yearNum = parseInt(year);
+      const monthNum = parseInt(month, 10) - 1;
+      const yearNum = parseInt(year, 10);
       const startOfMonth = new Date(Date.UTC(yearNum, monthNum, 1));
       const endOfMonth = new Date(Date.UTC(yearNum, monthNum + 1, 0, 23, 59, 59, 999));
       filter.startDate = { $gte: startOfMonth, $lte: endOfMonth };
@@ -330,7 +339,8 @@ const getEvents = async (req, res) => {
     }
 
     if (search && search.trim()) {
-      const regex = new RegExp(search.trim(), 'i');
+      const escaped = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
       if (filter.$or) {
         filter.$and = filter.$and || [];
         filter.$and.push({
@@ -341,8 +351,8 @@ const getEvents = async (req, res) => {
       }
     }
 
-    const pageNum = Math.max(1, parseInt(page) || 1);
-    const limitNum = Math.min(200, Math.max(1, parseInt(limit) || 100));
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(200, Math.max(1, parseInt(limit, 10) || 100));
     const skip = (pageNum - 1) * limitNum;
 
     const [events, total] = await Promise.all([
@@ -354,13 +364,14 @@ const getEvents = async (req, res) => {
         .populate('contact', 'name firstName lastName email phone company')
         .sort({ startDate: 1 })
         .skip(skip)
-        .limit(limitNum),
+        .limit(limitNum)
+        .lean(),
       Event.countDocuments(filter)
     ]);
 
     const formatted = events.map(safeEvent);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       events: formatted,
       appointments: formatted,
@@ -374,7 +385,7 @@ const getEvents = async (req, res) => {
     });
   } catch (error) {
     console.error('getEvents error:', error);
-    res.status(500).json({ success: false, message: 'Server error retrieving events.' });
+    return res.status(500).json({ success: false, message: 'Server error retrieving events.' });
   }
 };
 
@@ -404,7 +415,7 @@ const getEventStats = async (req, res) => {
       Event.aggregate([{ $match: filter }, { $group: { _id: '$status', count: { $sum: 1 } } }])
     ]);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       stats: {
         total,
@@ -425,7 +436,7 @@ const getEventStats = async (req, res) => {
     });
   } catch (error) {
     console.error('getEventStats error:', error);
-    res.status(500).json({ success: false, message: 'Server error retrieving event stats.' });
+    return res.status(500).json({ success: false, message: 'Server error retrieving event stats.' });
   }
 };
 
@@ -441,7 +452,8 @@ const getEventById = async (req, res) => {
       .populate('assignedTo', 'name email role avatar')
       .populate('participants', 'name email role avatar')
       .populate('attendees', 'name email role avatar')
-      .populate('contact', 'name firstName lastName email phone company');
+      .populate('contact', 'name firstName lastName email phone company')
+      .lean();
 
     if (!event) {
       return res.status(404).json({ success: false, message: 'Event not found.' });
@@ -464,7 +476,7 @@ const getEventById = async (req, res) => {
 
     const formatted = safeEvent(event);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       event: formatted,
       appointment: formatted,
@@ -472,7 +484,7 @@ const getEventById = async (req, res) => {
     });
   } catch (error) {
     console.error('getEventById error:', error);
-    res.status(500).json({ success: false, message: 'Server error retrieving event.' });
+    return res.status(500).json({ success: false, message: 'Server error retrieving event.' });
   }
 };
 
@@ -624,11 +636,12 @@ const updateEvent = async (req, res) => {
       .populate('assignedTo', 'name email role avatar')
       .populate('participants', 'name email role avatar')
       .populate('attendees', 'name email role avatar')
-      .populate('contact', 'name firstName lastName email phone company');
+      .populate('contact', 'name firstName lastName email phone company')
+      .lean();
 
     const formatted = safeEvent(populated);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: 'Event updated successfully.',
       event: formatted,
@@ -637,7 +650,7 @@ const updateEvent = async (req, res) => {
     });
   } catch (error) {
     console.error('updateEvent error:', error);
-    res.status(500).json({ success: false, message: 'Server error updating event.' });
+    return res.status(500).json({ success: false, message: 'Server error updating event.' });
   }
 };
 
@@ -671,11 +684,12 @@ const cancelEvent = async (req, res) => {
       .populate('assignedTo', 'name email role avatar')
       .populate('participants', 'name email role avatar')
       .populate('attendees', 'name email role avatar')
-      .populate('contact', 'name firstName lastName email phone company');
+      .populate('contact', 'name firstName lastName email phone company')
+      .lean();
 
     const formatted = safeEvent(populated);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: 'Event cancelled successfully.',
       event: formatted,
@@ -684,7 +698,7 @@ const cancelEvent = async (req, res) => {
     });
   } catch (error) {
     console.error('cancelEvent error:', error);
-    res.status(500).json({ success: false, message: 'Server error cancelling event.' });
+    return res.status(500).json({ success: false, message: 'Server error cancelling event.' });
   }
 };
 
@@ -695,7 +709,7 @@ const deleteEvent = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid event ID.' });
     }
 
-    const event = await Event.findById(req.params.id);
+    const event = await Event.findById(req.params.id).select('createdBy').lean();
     if (!event) {
       return res.status(404).json({ success: false, message: 'Event not found.' });
     }
@@ -712,13 +726,13 @@ const deleteEvent = async (req, res) => {
 
     await Event.findByIdAndDelete(req.params.id);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: 'Event deleted successfully.'
     });
   } catch (error) {
     console.error('deleteEvent error:', error);
-    res.status(500).json({ success: false, message: 'Server error deleting event.' });
+    return res.status(500).json({ success: false, message: 'Server error deleting event.' });
   }
 };
 

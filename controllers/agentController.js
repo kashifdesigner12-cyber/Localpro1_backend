@@ -1,14 +1,21 @@
 const mongoose = require('mongoose');
 const Agent = require('../models/Agent');
 
-const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
+const isValidObjectId = (id) =>
+  Boolean(id) && mongoose.Types.ObjectId.isValid(id);
+
 const VALID_TYPES = ['voice', 'chat', 'sms', 'email', 'multi-purpose'];
 const VALID_STATUSES = ['active', 'inactive', 'draft', 'archived'];
 
 const safeUserRef = (u) => {
   if (!u) return null;
   if (typeof u === 'object' && u._id) {
-    return { id: u._id, _id: u._id, name: u.name, email: u.email, avatar: u.avatar || null };
+    let cleanAvatar = u.avatar || null;
+    if (typeof cleanAvatar === 'string' && cleanAvatar.startsWith('data:image') && cleanAvatar.length > 1000) {
+      cleanAvatar = null;
+    }
+
+    return { id: u._id, _id: u._id, name: u.name || '', email: u.email || '', avatar: cleanAvatar };
   }
   return u;
 };
@@ -16,8 +23,8 @@ const safeUserRef = (u) => {
 const safeAgent = (a) => ({
   id: a._id,
   _id: a._id,
-  name: a.name,
-  role: a.role,
+  name: a.name || '',
+  role: a.role || '',
   description: a.description || '',
   type: a.type || 'chat',
   status: a.status || 'active',
@@ -48,8 +55,8 @@ const safeAgent = (a) => ({
     ? a.activity.map((act) => ({
         id: act._id,
         _id: act._id,
-        action: act.action,
-        details: act.details,
+        action: act.action || '',
+        details: act.details || '',
         timestamp: act.timestamp
       }))
     : [],
@@ -82,13 +89,16 @@ const createAgent = async (req, res) => {
       metadata: metadata || {}
     });
 
-    const populated = await Agent.findById(agent._id).populate('createdBy', 'name email avatar');
+    const populated = await Agent.findById(agent._id)
+      .populate('createdBy', 'name email avatar')
+      .lean();
+
     const formatted = safeAgent(populated);
 
-    res.status(201).json({ success: true, message: 'AI Agent created successfully.', agent: formatted, data: formatted });
+    return res.status(201).json({ success: true, message: 'AI Agent created successfully.', agent: formatted, data: formatted });
   } catch (error) {
     console.error('createAgent error:', error);
-    res.status(500).json({ success: false, message: 'Server error creating AI Agent.' });
+    return res.status(500).json({ success: false, message: 'Server error creating AI Agent.' });
   }
 };
 
@@ -100,29 +110,36 @@ const getAgents = async (req, res) => {
     if (!isAdminOrManager) filter.createdBy = req.user._id;
     if (status) filter.status = status.toLowerCase();
     if (type) filter.type = type.toLowerCase();
-    if (role) filter.role = new RegExp(role.trim(), 'i');
+
+    if (role && role.trim()) {
+      const escapedRole = role.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      filter.role = new RegExp(escapedRole, 'i');
+    }
 
     if (search && search.trim()) {
-      const regex = new RegExp(search.trim(), 'i');
+      const escaped = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
       filter.$or = [{ name: regex }, { role: regex }, { description: regex }];
     }
 
-    const pageNum = Math.max(1, parseInt(page) || 1);
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 50));
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
     const skip = (pageNum - 1) * limitNum;
 
     const [agents, total] = await Promise.all([
       Agent.find(filter)
+        .select('-knowledgeBase -activity')
         .populate('createdBy', 'name email avatar')
         .sort(sort === 'oldest' ? { createdAt: 1 } : { createdAt: -1 })
         .skip(skip)
-        .limit(limitNum),
+        .limit(limitNum)
+        .lean(),
       Agent.countDocuments(filter)
     ]);
 
     const formatted = agents.map(safeAgent);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       agents: formatted,
       data: formatted,
@@ -130,7 +147,7 @@ const getAgents = async (req, res) => {
     });
   } catch (error) {
     console.error('getAgents error:', error);
-    res.status(500).json({ success: false, message: 'Server error retrieving AI Agents.' });
+    return res.status(500).json({ success: false, message: 'Server error retrieving AI Agents.' });
   }
 };
 
@@ -169,17 +186,20 @@ const getAgentStats = async (req, res) => {
       ...(statsAgg[0] || {})
     };
 
-    res.status(200).json({ success: true, stats, data: stats });
+    return res.status(200).json({ success: true, stats, data: stats });
   } catch (error) {
     console.error('getAgentStats error:', error);
-    res.status(500).json({ success: false, message: 'Server error retrieving AI Agent stats.' });
+    return res.status(500).json({ success: false, message: 'Server error retrieving AI Agent stats.' });
   }
 };
 
 const getAgentById = async (req, res) => {
   try {
     if (!isValidObjectId(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid agent ID.' });
-    const agent = await Agent.findById(req.params.id).populate('createdBy', 'name email avatar');
+    const agent = await Agent.findById(req.params.id)
+      .populate('createdBy', 'name email avatar')
+      .lean();
+
     if (!agent) return res.status(404).json({ success: false, message: 'AI Agent not found.' });
 
     const isCreator = agent.createdBy && (agent.createdBy._id ? agent.createdBy._id.toString() : agent.createdBy.toString()) === req.user._id.toString();
@@ -187,10 +207,10 @@ const getAgentById = async (req, res) => {
     if (!isCreator && !isAdminOrManager) return res.status(403).json({ success: false, message: 'Access denied.' });
 
     const formatted = safeAgent(agent);
-    res.status(200).json({ success: true, agent: formatted, data: formatted });
+    return res.status(200).json({ success: true, agent: formatted, data: formatted });
   } catch (error) {
     console.error('getAgentById error:', error);
-    res.status(500).json({ success: false, message: 'Server error retrieving AI Agent.' });
+    return res.status(500).json({ success: false, message: 'Server error retrieving AI Agent.' });
   }
 };
 
@@ -225,20 +245,23 @@ const updateAgent = async (req, res) => {
     agent.activity.push({ action: 'updated', details: 'Agent configuration updated', timestamp: new Date() });
     await agent.save();
 
-    const populated = await Agent.findById(agent._id).populate('createdBy', 'name email avatar');
+    const populated = await Agent.findById(agent._id)
+      .populate('createdBy', 'name email avatar')
+      .lean();
+
     const formatted = safeAgent(populated);
 
-    res.status(200).json({ success: true, message: 'AI Agent updated successfully.', agent: formatted, data: formatted });
+    return res.status(200).json({ success: true, message: 'AI Agent updated successfully.', agent: formatted, data: formatted });
   } catch (error) {
     console.error('updateAgent error:', error);
-    res.status(500).json({ success: false, message: 'Server error updating AI Agent.' });
+    return res.status(500).json({ success: false, message: 'Server error updating AI Agent.' });
   }
 };
 
 const deleteAgent = async (req, res) => {
   try {
     if (!isValidObjectId(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid agent ID.' });
-    const agent = await Agent.findById(req.params.id);
+    const agent = await Agent.findById(req.params.id).select('createdBy').lean();
     if (!agent) return res.status(404).json({ success: false, message: 'AI Agent not found.' });
 
     const isCreator = agent.createdBy && agent.createdBy.toString() === req.user._id.toString();
@@ -246,10 +269,10 @@ const deleteAgent = async (req, res) => {
     if (!isCreator && !isAdminOrManager) return res.status(403).json({ success: false, message: 'Access denied.' });
 
     await Agent.findByIdAndDelete(req.params.id);
-    res.status(200).json({ success: true, message: 'AI Agent deleted successfully.' });
+    return res.status(200).json({ success: true, message: 'AI Agent deleted successfully.' });
   } catch (error) {
     console.error('deleteAgent error:', error);
-    res.status(500).json({ success: false, message: 'Server error deleting AI Agent.' });
+    return res.status(500).json({ success: false, message: 'Server error deleting AI Agent.' });
   }
 };
 

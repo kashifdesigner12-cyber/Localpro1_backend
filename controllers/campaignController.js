@@ -1,14 +1,27 @@
 const mongoose = require('mongoose');
 const Campaign = require('../models/Campaign');
 
-const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
+const isValidObjectId = (id) =>
+  Boolean(id) && mongoose.Types.ObjectId.isValid(id);
+
 const VALID_TYPES = ['email', 'sms', 'social', 'call', 'multi-channel', 'custom'];
 const VALID_STATUSES = ['draft', 'scheduled', 'active', 'paused', 'completed', 'cancelled'];
 
 const safeUserRef = (u) => {
   if (!u) return null;
   if (typeof u === 'object' && u._id) {
-    return { id: u._id, _id: u._id, name: u.name, email: u.email, avatar: u.avatar || null };
+    let cleanAvatar = u.avatar || null;
+    if (typeof cleanAvatar === 'string' && cleanAvatar.startsWith('data:image') && cleanAvatar.length > 1000) {
+      cleanAvatar = null;
+    }
+
+    return {
+      id: u._id,
+      _id: u._id,
+      name: u.name || '',
+      email: u.email || '',
+      avatar: cleanAvatar
+    };
   }
   return u;
 };
@@ -63,19 +76,27 @@ const createCampaign = async (req, res) => {
       metadata: metadata || {}
     });
 
-    const populated = await Campaign.findById(campaign._id).populate('createdBy', 'name email avatar');
+    const populated = await Campaign.findById(campaign._id)
+      .populate('createdBy', 'name email avatar')
+      .lean();
+
     const formatted = safeCampaign(populated);
 
-    res.status(201).json({ success: true, message: 'Campaign created successfully.', campaign: formatted, data: formatted });
+    return res.status(201).json({
+      success: true,
+      message: 'Campaign created successfully.',
+      campaign: formatted,
+      data: formatted
+    });
   } catch (error) {
     console.error('createCampaign error:', error);
-    res.status(500).json({ success: false, message: 'Server error creating campaign.' });
+    return res.status(500).json({ success: false, message: 'Server error creating campaign.' });
   }
 };
 
 const getCampaigns = async (req, res) => {
   try {
-    const { search, status, type, startDate, endDate, page = 1, limit = 50, sort = '-createdAt' } = req.query;
+    const { search, status, type, page = 1, limit = 50, sort = '-createdAt' } = req.query;
     const filter = {};
     const isAdminOrManager = req.user.role === 'admin' || req.user.role === 'manager';
     if (!isAdminOrManager) filter.createdBy = req.user._id;
@@ -83,12 +104,13 @@ const getCampaigns = async (req, res) => {
     if (type) filter.type = type.toLowerCase();
 
     if (search && search.trim()) {
-      const regex = new RegExp(search.trim(), 'i');
+      const escaped = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
       filter.$or = [{ name: regex }, { title: regex }, { description: regex }];
     }
 
-    const pageNum = Math.max(1, parseInt(page) || 1);
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 50));
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
     const skip = (pageNum - 1) * limitNum;
 
     const [campaigns, total] = await Promise.all([
@@ -96,13 +118,14 @@ const getCampaigns = async (req, res) => {
         .populate('createdBy', 'name email avatar')
         .sort(sort === 'oldest' ? { createdAt: 1 } : { createdAt: -1 })
         .skip(skip)
-        .limit(limitNum),
+        .limit(limitNum)
+        .lean(),
       Campaign.countDocuments(filter)
     ]);
 
     const formatted = campaigns.map(safeCampaign);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       campaigns: formatted,
       data: formatted,
@@ -110,7 +133,7 @@ const getCampaigns = async (req, res) => {
     });
   } catch (error) {
     console.error('getCampaigns error:', error);
-    res.status(500).json({ success: false, message: 'Server error retrieving campaigns.' });
+    return res.status(500).json({ success: false, message: 'Server error retrieving campaigns.' });
   }
 };
 
@@ -156,17 +179,20 @@ const getCampaignStats = async (req, res) => {
       ...(budgetAgg[0] || {})
     };
 
-    res.status(200).json({ success: true, stats, data: stats });
+    return res.status(200).json({ success: true, stats, data: stats });
   } catch (error) {
     console.error('getCampaignStats error:', error);
-    res.status(500).json({ success: false, message: 'Server error retrieving campaign stats.' });
+    return res.status(500).json({ success: false, message: 'Server error retrieving campaign stats.' });
   }
 };
 
 const getCampaignById = async (req, res) => {
   try {
     if (!isValidObjectId(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid campaign ID.' });
-    const campaign = await Campaign.findById(req.params.id).populate('createdBy', 'name email avatar');
+    const campaign = await Campaign.findById(req.params.id)
+      .populate('createdBy', 'name email avatar')
+      .lean();
+
     if (!campaign) return res.status(404).json({ success: false, message: 'Campaign not found.' });
 
     const isCreator = campaign.createdBy && (campaign.createdBy._id ? campaign.createdBy._id.toString() : campaign.createdBy.toString()) === req.user._id.toString();
@@ -174,10 +200,10 @@ const getCampaignById = async (req, res) => {
     if (!isCreator && !isAdminOrManager) return res.status(403).json({ success: false, message: 'Access denied.' });
 
     const formatted = safeCampaign(campaign);
-    res.status(200).json({ success: true, campaign: formatted, data: formatted });
+    return res.status(200).json({ success: true, campaign: formatted, data: formatted });
   } catch (error) {
     console.error('getCampaignById error:', error);
-    res.status(500).json({ success: false, message: 'Server error retrieving campaign.' });
+    return res.status(500).json({ success: false, message: 'Server error retrieving campaign.' });
   }
 };
 
@@ -205,20 +231,28 @@ const updateCampaign = async (req, res) => {
     if (metadata !== undefined) campaign.metadata = { ...campaign.metadata, ...metadata };
 
     await campaign.save();
-    const populated = await Campaign.findById(campaign._id).populate('createdBy', 'name email avatar');
+    const populated = await Campaign.findById(campaign._id)
+      .populate('createdBy', 'name email avatar')
+      .lean();
+
     const formatted = safeCampaign(populated);
 
-    res.status(200).json({ success: true, message: 'Campaign updated successfully.', campaign: formatted, data: formatted });
+    return res.status(200).json({
+      success: true,
+      message: 'Campaign updated successfully.',
+      campaign: formatted,
+      data: formatted
+    });
   } catch (error) {
     console.error('updateCampaign error:', error);
-    res.status(500).json({ success: false, message: 'Server error updating campaign.' });
+    return res.status(500).json({ success: false, message: 'Server error updating campaign.' });
   }
 };
 
 const deleteCampaign = async (req, res) => {
   try {
     if (!isValidObjectId(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid campaign ID.' });
-    const campaign = await Campaign.findById(req.params.id);
+    const campaign = await Campaign.findById(req.params.id).select('createdBy').lean();
     if (!campaign) return res.status(404).json({ success: false, message: 'Campaign not found.' });
 
     const isCreator = campaign.createdBy && campaign.createdBy.toString() === req.user._id.toString();
@@ -226,10 +260,10 @@ const deleteCampaign = async (req, res) => {
     if (!isCreator && !isAdminOrManager) return res.status(403).json({ success: false, message: 'Access denied.' });
 
     await Campaign.findByIdAndDelete(req.params.id);
-    res.status(200).json({ success: true, message: 'Campaign deleted successfully.' });
+    return res.status(200).json({ success: true, message: 'Campaign deleted successfully.' });
   } catch (error) {
     console.error('deleteCampaign error:', error);
-    res.status(500).json({ success: false, message: 'Server error deleting campaign.' });
+    return res.status(500).json({ success: false, message: 'Server error deleting campaign.' });
   }
 };
 

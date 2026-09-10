@@ -3,7 +3,8 @@ const Contact = require('../models/Contact');
 const User = require('../models/User');
 const { createNotification } = require('./notificationController');
 
-const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
+const isValidObjectId = (id) =>
+  Boolean(id) && mongoose.Types.ObjectId.isValid(id);
 
 const VALID_STATUSES = [
   'active',
@@ -30,18 +31,23 @@ const VALID_LEAD_STATUSES = [
 
 const VALID_SOURCES = ['manual', 'sms', 'call', 'email', 'web', 'import', 'referral', 'other'];
 
-// Helper to format safe user reference
+// Helper to format safe user reference without heavy Base64 payload
 const safeUserRef = (u) => {
   if (!u) return null;
   if (typeof u === 'object' && u._id) {
+    let cleanAvatar = u.avatar || null;
+    if (typeof cleanAvatar === 'string' && cleanAvatar.startsWith('data:image') && cleanAvatar.length > 1000) {
+      cleanAvatar = null;
+    }
+
     return {
       id: u._id,
       _id: u._id,
-      name: u.name,
-      email: u.email,
+      name: u.name || '',
+      email: u.email || '',
       phone: u.phone !== undefined ? u.phone : undefined,
-      role: u.role,
-      avatar: u.avatar !== undefined ? u.avatar : null
+      role: u.role || '',
+      avatar: cleanAvatar
     };
   }
   return u;
@@ -52,6 +58,11 @@ const safeContact = (c) => {
   if (!c) return null;
   const user = safeUserRef(c.userId || c.user || c.createdBy);
   const assigned = safeUserRef(c.assignedTo);
+
+  let cleanAvatar = c.avatar || null;
+  if (typeof cleanAvatar === 'string' && cleanAvatar.startsWith('data:image') && cleanAvatar.length > 1000) {
+    cleanAvatar = null;
+  }
 
   return {
     id: c._id,
@@ -77,7 +88,7 @@ const safeContact = (c) => {
     state: c.state || '',
     country: c.country || '',
     zipCode: c.zipCode || '',
-    avatar: c.avatar || null,
+    avatar: cleanAvatar,
     avatarColor: c.avatarColor || '#2563EB',
     lastContactedAt: c.lastContactedAt || null,
     createdAt: c.createdAt,
@@ -142,7 +153,8 @@ const getContacts = async (req, res) => {
     }
 
     if (search && search.trim()) {
-      const regex = new RegExp(search.trim(), 'i');
+      const escaped = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
       const searchConditions = [
         { name: regex },
         { firstName: regex },
@@ -161,8 +173,8 @@ const getContacts = async (req, res) => {
       }
     }
 
-    const pageNum = Math.max(1, parseInt(page) || 1);
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 50));
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
     const skip = (pageNum - 1) * limitNum;
 
     let sortOption = { createdAt: -1 };
@@ -177,7 +189,8 @@ const getContacts = async (req, res) => {
         .populate('assignedTo', 'name email role avatar')
         .sort(sortOption)
         .skip(skip)
-        .limit(limitNum),
+        .limit(limitNum)
+        .lean(),
       Contact.countDocuments(filter)
     ]);
 
@@ -210,7 +223,8 @@ const getContact = async (req, res) => {
 
     const contact = await Contact.findById(req.params.id)
       .populate('userId', 'name email role avatar')
-      .populate('assignedTo', 'name email role avatar');
+      .populate('assignedTo', 'name email role avatar')
+      .lean();
 
     if (!contact) {
       return res.status(404).json({ success: false, message: 'Contact not found.' });
@@ -279,7 +293,7 @@ const createContact = async (req, res) => {
       if (!isValidObjectId(assignedTo)) {
         return res.status(400).json({ success: false, message: 'Invalid assignedTo user ID.' });
       }
-      const userExists = await User.findById(assignedTo);
+      const userExists = await User.findById(assignedTo).select('_id').lean();
       if (!userExists) {
         return res.status(404).json({ success: false, message: 'Assigned user not found.' });
       }
@@ -325,7 +339,8 @@ const createContact = async (req, res) => {
 
     const populated = await Contact.findById(contact._id)
       .populate('userId', 'name email role avatar')
-      .populate('assignedTo', 'name email role avatar');
+      .populate('assignedTo', 'name email role avatar')
+      .lean();
 
     // Notify assignee if assigned to someone else
     if (validAssignee && validAssignee.toString() !== req.user._id.toString()) {
@@ -448,7 +463,7 @@ const updateContact = async (req, res) => {
         if (!isValidObjectId(assignedTo)) {
           return res.status(400).json({ success: false, message: 'Invalid assignedTo user ID.' });
         }
-        const userExists = await User.findById(assignedTo);
+        const userExists = await User.findById(assignedTo).select('_id').lean();
         if (!userExists) {
           return res.status(404).json({ success: false, message: 'Assigned user not found.' });
         }
@@ -497,7 +512,8 @@ const updateContact = async (req, res) => {
 
     const populated = await Contact.findById(contact._id)
       .populate('userId', 'name email role avatar')
-      .populate('assignedTo', 'name email role avatar');
+      .populate('assignedTo', 'name email role avatar')
+      .lean();
 
     const formatted = safeContact(populated);
 
@@ -521,7 +537,7 @@ const deleteContact = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid contact ID.' });
     }
 
-    const contact = await Contact.findById(req.params.id);
+    const contact = await Contact.findById(req.params.id).select('userId user assignedTo').lean();
     if (!contact) {
       return res.status(404).json({ success: false, message: 'Contact not found.' });
     }
@@ -737,11 +753,11 @@ const findOrCreateContact = async (userId, data = {}) => {
   let contact = null;
 
   if (phone) {
-    contact = await Contact.findOne({ userId, phone });
+    contact = await Contact.findOne({ userId, phone }).lean();
   }
 
   if (!contact && data.email) {
-    contact = await Contact.findOne({ userId, email: data.email.toLowerCase() });
+    contact = await Contact.findOne({ userId, email: data.email.toLowerCase() }).lean();
   }
 
   if (!contact) {

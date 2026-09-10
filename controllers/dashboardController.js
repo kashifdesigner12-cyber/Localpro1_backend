@@ -31,7 +31,6 @@ const Agent = loadOptionalModel('../models/Agent');
 // HELPER
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Helper to get today's UTC date range
 const getTodayRange = (date = new Date()) => {
   const start = new Date(date);
   start.setUTCHours(0, 0, 0, 0);
@@ -41,7 +40,7 @@ const getTodayRange = (date = new Date()) => {
 
   return {
     start,
-    end
+    end,
   };
 };
 
@@ -56,7 +55,7 @@ const getStats = async (req, res) => {
 
     const {
       start: todayStart,
-      end: todayEnd
+      end: todayEnd,
     } = getTodayRange(now);
 
     const [
@@ -93,8 +92,10 @@ const getStats = async (req, res) => {
       todayLeave,
       totalAttendanceRecords,
 
-      // Conversations / Events
+      // Conversations
       totalConversations,
+
+      // Events
       totalEvents,
       upcomingEvents,
 
@@ -102,7 +103,7 @@ const getStats = async (req, res) => {
       totalCalls,
       totalEmails,
       totalCampaigns,
-      totalAgents
+      totalAgents,
     ] = await Promise.all([
       // ───────────────────────────────────────────────────────────────────────
       // USERS
@@ -111,21 +112,21 @@ const getStats = async (req, res) => {
       User.countDocuments(),
 
       User.countDocuments({
-        status: 'Active'
+        status: 'Active',
       }),
 
       User.countDocuments({
         status: {
-          $in: ['Inactive', 'Blocked']
-        }
+          $in: ['Inactive', 'Blocked'],
+        },
       }),
 
       User.countDocuments({
-        status: 'Blocked'
+        status: 'Blocked',
       }),
 
       User.countDocuments({
-        status: 'Pending'
+        status: 'Pending',
       }),
 
       // ───────────────────────────────────────────────────────────────────────
@@ -135,33 +136,33 @@ const getStats = async (req, res) => {
       Task.countDocuments(),
 
       Task.countDocuments({
-        status: 'Pending'
+        status: 'Pending',
       }),
 
       Task.countDocuments({
-        status: 'In Progress'
+        status: 'In Progress',
       }),
 
       Task.countDocuments({
-        status: 'Completed'
+        status: 'Completed',
       }),
 
       Task.countDocuments({
-        status: 'Cancelled'
+        status: 'Cancelled',
       }),
 
       Task.countDocuments({
         dueDate: {
           $lt: now,
-          $ne: null
+          $ne: null,
         },
         status: {
-          $nin: ['Completed', 'Cancelled']
-        }
+          $nin: ['Completed', 'Cancelled'],
+        },
       }),
 
       Task.countDocuments({
-        priority: 'Urgent'
+        priority: 'Urgent',
       }),
 
       // ───────────────────────────────────────────────────────────────────────
@@ -171,15 +172,15 @@ const getStats = async (req, res) => {
       LeaveRequest.countDocuments(),
 
       LeaveRequest.countDocuments({
-        status: 'Pending'
+        status: 'Pending',
       }),
 
       LeaveRequest.countDocuments({
-        status: 'Approved'
+        status: 'Approved',
       }),
 
       LeaveRequest.countDocuments({
-        status: 'Rejected'
+        status: 'Rejected',
       }),
 
       // ───────────────────────────────────────────────────────────────────────
@@ -187,7 +188,7 @@ const getStats = async (req, res) => {
       // ───────────────────────────────────────────────────────────────────────
 
       SignupRequest.countDocuments({
-        status: 'Pending'
+        status: 'Pending',
       }),
 
       // ───────────────────────────────────────────────────────────────────────
@@ -198,9 +199,9 @@ const getStats = async (req, res) => {
         ? Attendance.countDocuments({
             date: {
               $gte: todayStart,
-              $lte: todayEnd
+              $lte: todayEnd,
             },
-            status: 'Present'
+            status: 'Present',
           })
         : 0,
 
@@ -208,9 +209,9 @@ const getStats = async (req, res) => {
         ? Attendance.countDocuments({
             date: {
               $gte: todayStart,
-              $lte: todayEnd
+              $lte: todayEnd,
             },
-            status: 'Absent'
+            status: 'Absent',
           })
         : 0,
 
@@ -218,9 +219,9 @@ const getStats = async (req, res) => {
         ? Attendance.countDocuments({
             date: {
               $gte: todayStart,
-              $lte: todayEnd
+              $lte: todayEnd,
             },
-            status: 'Late'
+            status: 'Late',
           })
         : 0,
 
@@ -228,9 +229,9 @@ const getStats = async (req, res) => {
         ? Attendance.countDocuments({
             date: {
               $gte: todayStart,
-              $lte: todayEnd
+              $lte: todayEnd,
             },
-            status: 'Half Day'
+            status: 'Half Day',
           })
         : 0,
 
@@ -238,9 +239,9 @@ const getStats = async (req, res) => {
         ? Attendance.countDocuments({
             date: {
               $gte: todayStart,
-              $lte: todayEnd
+              $lte: todayEnd,
             },
-            status: 'Leave'
+            status: 'Leave',
           })
         : 0,
 
@@ -267,8 +268,8 @@ const getStats = async (req, res) => {
       Event
         ? Event.countDocuments({
             startDate: {
-              $gte: now
-            }
+              $gte: now,
+            },
           })
         : 0,
 
@@ -302,7 +303,7 @@ const getStats = async (req, res) => {
 
       Agent
         ? Agent.countDocuments()
-        : 0
+        : 0,
     ]);
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -314,15 +315,17 @@ const getStats = async (req, res) => {
 
     if (Contact) {
       try {
-        totalLeads = await Contact.countDocuments();
+        [totalLeads, newLeads] = await Promise.all([
+          Contact.countDocuments(),
 
-        newLeads = await Contact.countDocuments({
-          createdAt: {
-            $gte: new Date(
-              Date.now() - 30 * 24 * 60 * 60 * 1000
-            )
-          }
-        });
+          Contact.countDocuments({
+            createdAt: {
+              $gte: new Date(
+                Date.now() - 30 * 24 * 60 * 60 * 1000
+              ),
+            },
+          }),
+        ]);
       } catch (error) {
         console.error(
           'Contact stats error:',
@@ -341,8 +344,8 @@ const getStats = async (req, res) => {
       try {
         appointments = await Event.countDocuments({
           startDate: {
-            $gte: now
-          }
+            $gte: now,
+          },
         });
       } catch (error) {
         console.error(
@@ -392,7 +395,7 @@ const getStats = async (req, res) => {
           late: todayLate,
           halfDay: todayHalfDay,
           leave: todayLeave,
-          totalRecords: totalAttendanceRecords
+          totalRecords: totalAttendanceRecords,
         },
 
         // Conversations / Events
@@ -415,8 +418,8 @@ const getStats = async (req, res) => {
 
         // Existing dashboard metrics
         revenue: 0,
-        responseRate: 85
-      }
+        responseRate: 85,
+      },
     });
   } catch (error) {
     console.error(
@@ -427,7 +430,7 @@ const getStats = async (req, res) => {
     return res.status(500).json({
       success: false,
       message:
-        'Server error retrieving dashboard stats.'
+        'Server error retrieving dashboard stats.',
     });
   }
 };
@@ -445,8 +448,12 @@ const getSummary = async (req, res) => {
 
     const {
       start: todayStart,
-      end: todayEnd
+      end: todayEnd,
     } = getTodayRange(now);
+
+    const sevenDaysAgo = new Date(
+      Date.now() - 7 * 24 * 60 * 60 * 1000
+    );
 
     const [
       // Tasks
@@ -464,189 +471,133 @@ const getSummary = async (req, res) => {
       myUnreadMessages,
 
       // Attendance
-      myTodayAttendance
+      myTodayAttendance,
+
+      // Conversations
+      totalConversations,
+
+      // Calls
+      missedCalls,
+
+      // Emails
+      totalEmails,
+
+      // Contacts
+      newContacts,
     ] = await Promise.all([
-      // Pending tasks assigned to current user
       Task.countDocuments({
         assignedTo: userId,
-        status: 'Pending'
+        status: 'Pending',
       }),
 
-      // Completed tasks assigned to current user
       Task.countDocuments({
         assignedTo: userId,
-        status: 'Completed'
+        status: 'Completed',
       }),
 
-      // Total tasks assigned to current user
       Task.countDocuments({
-        assignedTo: userId
+        assignedTo: userId,
       }),
 
-      // Upcoming events
       Event
         ? Event.countDocuments({
             $or: [
               {
-                assignedTo: userId
+                assignedTo: userId,
               },
               {
-                participants: userId
+                participants: userId,
               },
               {
-                createdBy: userId
-              }
+                createdBy: userId,
+              },
             ],
             startDate: {
-              $gte: now
-            }
+              $gte: now,
+            },
           })
         : 0,
 
-      // Unread notifications
       Notification.countDocuments({
         user: userId,
-        isRead: false
+        isRead: false,
       }),
 
-      // Unread messages
       Message
         ? Message.countDocuments({
             $or: [
               {
-                recipient: userId
+                recipient: userId,
               },
               {
-                user: userId
-              }
+                user: userId,
+              },
             ],
-            isRead: false
+            isRead: false,
           })
         : 0,
 
-      // Today's attendance
       Attendance
         ? Attendance.findOne({
             user: userId,
             date: {
               $gte: todayStart,
-              $lte: todayEnd
-            }
+              $lte: todayEnd,
+            },
           })
-        : null
-    ]);
+            .select('status checkIn checkOut')
+            .lean()
+        : null,
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // ADDITIONAL SUMMARY METRICS
-    // ─────────────────────────────────────────────────────────────────────────
-
-    let totalConversations = 0;
-    let missedCalls = 0;
-    let totalEmails = 0;
-    let newContacts = 0;
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // CONVERSATIONS
-    // ─────────────────────────────────────────────────────────────────────────
-
-    if (Conversation) {
-      try {
-        totalConversations =
-          await Conversation.countDocuments({
+      Conversation
+        ? Conversation.countDocuments({
             $or: [
               {
-                participants: userId
+                participants: userId,
               },
               {
-                user: userId
-              }
-            ]
-          });
-      } catch (error) {
-        console.error(
-          'Conversation summary error:',
-          error.message
-        );
-      }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // MISSED CALLS
-    // ─────────────────────────────────────────────────────────────────────────
-
-    if (Call) {
-      try {
-        missedCalls =
-          await Call.countDocuments({
-            $or: [
-              {
-                user: userId
+                user: userId,
               },
-              {
-                recipient: userId
-              }
             ],
-            status: 'missed'
-          });
-      } catch (error) {
-        console.error(
-          'Call summary error:',
-          error.message
-        );
-      }
-    }
+          })
+        : 0,
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // EMAILS
-    // ─────────────────────────────────────────────────────────────────────────
-
-    if (Email) {
-      try {
-        totalEmails =
-          await Email.countDocuments({
-            user: userId
-          });
-      } catch (error) {
-        console.error(
-          'Email summary error:',
-          error.message
-        );
-      }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW CONTACTS
-    // ─────────────────────────────────────────────────────────────────────────
-
-    if (Contact) {
-      try {
-        const sevenDaysAgo =
-          new Date(
-            Date.now() -
-              7 * 24 * 60 * 60 * 1000
-          );
-
-        newContacts =
-          await Contact.countDocuments({
+      Call
+        ? Call.countDocuments({
             $or: [
               {
-                user: userId
+                user: userId,
               },
               {
-                createdBy: userId
-              }
+                recipient: userId,
+              },
+            ],
+            status: 'missed',
+          })
+        : 0,
+
+      Email
+        ? Email.countDocuments({
+            user: userId,
+          })
+        : 0,
+
+      Contact
+        ? Contact.countDocuments({
+            $or: [
+              {
+                user: userId,
+              },
+              {
+                createdBy: userId,
+              },
             ],
             createdAt: {
-              $gte: sevenDaysAgo
-            }
-          });
-      } catch (error) {
-        console.error(
-          'Contact summary error:',
-          error.message
-        );
-      }
-    }
+              $gte: sevenDaysAgo,
+            },
+          })
+        : 0,
+    ]);
 
     // ─────────────────────────────────────────────────────────────────────────
     // RESPONSE
@@ -685,28 +636,22 @@ const getSummary = async (req, res) => {
           newContacts,
 
           // Attendance
-          todayAttendance:
-            myTodayAttendance
-              ? {
-                  status:
-                    myTodayAttendance.status,
-
-                  checkIn:
-                    myTodayAttendance.checkIn,
-
-                  checkOut:
-                    myTodayAttendance.checkOut
-                }
-              : null,
+          todayAttendance: myTodayAttendance
+            ? {
+                status: myTodayAttendance.status,
+                checkIn: myTodayAttendance.checkIn,
+                checkOut: myTodayAttendance.checkOut,
+              }
+            : null,
 
           // Existing metric
-          responseRate: 85
+          responseRate: 85,
         },
 
         recentActivity: [],
 
-        chartData: []
-      }
+        chartData: [],
+      },
     });
   } catch (error) {
     console.error(
@@ -717,7 +662,7 @@ const getSummary = async (req, res) => {
     return res.status(500).json({
       success: false,
       message:
-        'Server error retrieving summary.'
+        'Server error retrieving summary.',
     });
   }
 };
@@ -727,76 +672,99 @@ const getSummary = async (req, res) => {
 // Admin / Manager
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/dashboard/activity
+// Admin / Manager
+// ─────────────────────────────────────────────────────────────────────────────
+
 const getActivity = async (req, res) => {
   try {
-    const [
-      recentTasks,
-      recentLeaves,
-      recentEvents
-    ] = await Promise.all([
-      // Recent tasks
-      Task.find()
-        .populate(
-          'createdBy',
-          'name email avatar'
-        )
-        .populate(
-          'assignedTo',
-          'name email avatar'
-        )
-        .sort({
-          createdAt: -1
-        })
-        .limit(10),
+    const startTime = Date.now();
 
-      // Recent leave requests
-      LeaveRequest.find()
-        .populate(
-          'user',
-          'name email avatar'
+    // Use _id sorting because MongoDB always has an _id index.
+    // This avoids expensive collection sorting when createdAt
+    // does not have a suitable index.
+    const [recentTasks, recentLeaves, recentEvents] = await Promise.all([
+      Task.find({})
+        .select(
+          'title status priority dueDate completedAt createdAt createdBy assignedTo'
         )
-        .sort({
-          createdAt: -1
+        .sort({ _id: -1 })
+        .limit(10)
+        .populate({
+          path: 'createdBy',
+          select: 'name email',
+          options: { lean: true },
         })
-        .limit(5),
+        .populate({
+          path: 'assignedTo',
+          select: 'name email',
+          options: { lean: true },
+        })
+        .lean(),
 
-      // Recent events
+      LeaveRequest.find({})
+        .select(
+          'user leaveType startDate endDate status reviewedBy reviewedAt createdAt'
+        )
+        .sort({ _id: -1 })
+        .limit(5)
+        .populate({
+          path: 'user',
+          select: 'name email',
+          options: { lean: true },
+        })
+        .populate({
+          path: 'reviewedBy',
+          select: 'name email',
+          options: { lean: true },
+        })
+        .lean(),
+
       Event
-        ? Event.find()
-            .populate(
-              'createdBy',
-              'name email avatar'
+        ? Event.find({})
+            .select(
+              'title startDate endDate allDay location type eventType status createdBy assignedTo createdAt'
             )
-            .populate(
-              'assignedTo',
-              'name email avatar'
-            )
-            .sort({
-              createdAt: -1
-            })
+            .sort({ _id: -1 })
             .limit(5)
-        : []
+            .populate({
+              path: 'createdBy',
+              select: 'name email',
+              options: { lean: true },
+            })
+            .populate({
+              path: 'assignedTo',
+              select: 'name email',
+              options: { lean: true },
+            })
+            .lean()
+        : [],
     ]);
+
+    const executionTime = Date.now() - startTime;
+
+    console.log(
+      `[Dashboard Activity] ${executionTime}ms | ` +
+      `Tasks: ${recentTasks.length} | ` +
+      `Leaves: ${recentLeaves.length} | ` +
+      `Events: ${recentEvents.length}`
+    );
 
     return res.status(200).json({
       success: true,
-
       recentActivity: {
         tasks: recentTasks,
         leaveRequests: recentLeaves,
-        events: recentEvents
-      }
+        events: recentEvents,
+      },
     });
   } catch (error) {
-    console.error(
-      'getActivity error:',
-      error
-    );
+    console.error('getActivity error:', error);
 
     return res.status(500).json({
       success: false,
-      message:
-        'Server error retrieving activity.'
+      message: 'Server error retrieving activity.',
     });
   }
 };
@@ -813,7 +781,7 @@ const getChartData = async (req, res) => {
       tasksByPriority,
       usersByRole,
       leaveSummary,
-      attendanceSummary
+      attendanceSummary,
     ] = await Promise.all([
       // Tasks by status
       Task.aggregate([
@@ -821,10 +789,10 @@ const getChartData = async (req, res) => {
           $group: {
             _id: '$status',
             count: {
-              $sum: 1
-            }
-          }
-        }
+              $sum: 1,
+            },
+          },
+        },
       ]),
 
       // Tasks by priority
@@ -833,10 +801,10 @@ const getChartData = async (req, res) => {
           $group: {
             _id: '$priority',
             count: {
-              $sum: 1
-            }
-          }
-        }
+              $sum: 1,
+            },
+          },
+        },
       ]),
 
       // Users by role
@@ -845,10 +813,10 @@ const getChartData = async (req, res) => {
           $group: {
             _id: '$role',
             count: {
-              $sum: 1
-            }
-          }
-        }
+              $sum: 1,
+            },
+          },
+        },
       ]),
 
       // Leave summary
@@ -857,10 +825,10 @@ const getChartData = async (req, res) => {
           $group: {
             _id: '$status',
             count: {
-              $sum: 1
-            }
-          }
-        }
+              $sum: 1,
+            },
+          },
+        },
       ]),
 
       // Attendance summary
@@ -870,12 +838,12 @@ const getChartData = async (req, res) => {
               $group: {
                 _id: '$status',
                 count: {
-                  $sum: 1
-                }
-              }
-            }
+                  $sum: 1,
+                },
+              },
+            },
           ])
-        : []
+        : [],
     ]);
 
     return res.status(200).json({
@@ -886,8 +854,8 @@ const getChartData = async (req, res) => {
         tasksByPriority,
         usersByRole,
         leaveSummary,
-        attendanceSummary
-      }
+        attendanceSummary,
+      },
     });
   } catch (error) {
     console.error(
@@ -898,7 +866,7 @@ const getChartData = async (req, res) => {
     return res.status(500).json({
       success: false,
       message:
-        'Server error retrieving chart data.'
+        'Server error retrieving chart data.',
     });
   }
 };
@@ -911,5 +879,5 @@ module.exports = {
   getStats,
   getSummary,
   getActivity,
-  getChartData
+  getChartData,
 };

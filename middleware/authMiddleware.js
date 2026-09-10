@@ -9,9 +9,15 @@ const User = require("../models/User");
 // 2. HttpOnly cookie: token
 // 3. x-auth-token header
 //
-// Also checks the CURRENT user from database.
-// This means deleted/blocked/inactive users cannot continue
-// using an old JWT token.
+// IMPORTANT:
+// We still verify the CURRENT user from MongoDB so that:
+// - Deleted users cannot use old JWTs
+// - Blocked users cannot continue
+// - Inactive users cannot continue
+//
+// Optimization:
+// Only required user fields are selected.
+// Password and unnecessary fields are NOT loaded.
 // ============================================================
 
 const protect = async (req, res, next) => {
@@ -22,18 +28,20 @@ const protect = async (req, res, next) => {
     // 1. AUTHORIZATION HEADER
     // --------------------------------------------------------
 
+    const authorization = req.headers.authorization;
+
     if (
-      req.headers.authorization &&
-      req.headers.authorization.startsWith("Bearer ")
+      authorization &&
+      authorization.startsWith("Bearer ")
     ) {
-      token = req.headers.authorization.split(" ")[1];
+      token = authorization.slice(7).trim();
     }
 
     // --------------------------------------------------------
     // 2. HTTPONLY COOKIE
     // --------------------------------------------------------
 
-    else if (req.cookies && req.cookies.token) {
+    if (!token && req.cookies?.token) {
       token = req.cookies.token;
     }
 
@@ -41,7 +49,7 @@ const protect = async (req, res, next) => {
     // 3. X-AUTH-TOKEN
     // --------------------------------------------------------
 
-    else if (req.headers["x-auth-token"]) {
+    if (!token && req.headers["x-auth-token"]) {
       token = req.headers["x-auth-token"];
     }
 
@@ -60,7 +68,9 @@ const protect = async (req, res, next) => {
     // JWT SECRET CHECK
     // --------------------------------------------------------
 
-    if (!process.env.JWT_SECRET) {
+    const jwtSecret = process.env.JWT_SECRET;
+
+    if (!jwtSecret) {
       console.error(
         "JWT_SECRET is missing from environment variables."
       );
@@ -79,12 +89,8 @@ const protect = async (req, res, next) => {
     let decoded;
 
     try {
-      decoded = jwt.verify(
-        token,
-        process.env.JWT_SECRET
-      );
+      decoded = jwt.verify(token, jwtSecret);
     } catch (error) {
-      // Token expired
       if (error.name === "TokenExpiredError") {
         return res.status(401).json({
           success: false,
@@ -93,7 +99,6 @@ const protect = async (req, res, next) => {
         });
       }
 
-      // Invalid token
       return res.status(401).json({
         success: false,
         message: "Invalid token.",
@@ -114,17 +119,27 @@ const protect = async (req, res, next) => {
     // --------------------------------------------------------
     // FIND CURRENT USER
     // --------------------------------------------------------
-    // IMPORTANT:
-    // We fetch the user from MongoDB on every protected request.
     //
-    // If admin deleted the user:
-    // User.findById() returns null.
-    // Therefore the old JWT becomes useless.
+    // IMPORTANT PERFORMANCE CHANGE:
+    //
+    // The previous code:
+    //
+    //   select("-password")
+    //
+    // could load almost the entire User document.
+    //
+    // We only need these fields for authentication and
+    // authorization.
+    //
+    // This makes the query smaller and reduces MongoDB ->
+    // Node.js data transfer.
     // --------------------------------------------------------
 
-    const user = await User.findById(decoded.id).select(
-      "-password"
-    );
+    const user = await User.findById(decoded.id)
+      .select(
+        "_id name email role isDeleted isActive status"
+      )
+      .lean();
 
     // --------------------------------------------------------
     // USER DOES NOT EXIST
@@ -191,16 +206,16 @@ const protect = async (req, res, next) => {
     }
 
     // --------------------------------------------------------
-    // ATTACH CURRENT USER TO REQUEST
+    // ATTACH USER TO REQUEST
     // --------------------------------------------------------
 
     req.user = user;
 
-    next();
+    return next();
   } catch (error) {
     console.error(
       "Authentication middleware error:",
-      error
+      error.message
     );
 
     return res.status(500).json({
@@ -214,6 +229,7 @@ const protect = async (req, res, next) => {
 // ============================================================
 // ROLE-BASED AUTHORIZATION
 // ============================================================
+//
 // Usage:
 //
 // authorize("admin")
@@ -269,7 +285,7 @@ const authorize = (...roles) => {
       });
     }
 
-    next();
+    return next();
   };
 };
 

@@ -67,35 +67,6 @@ const TaskSchema = new mongoose.Schema(
       default: null,
     },
 
-    /*
-     * =========================================================
-     * TASK ATTACHMENTS
-     * =========================================================
-     *
-     * Files attached by Admin/Manager while assigning a task.
-     *
-     * url:
-     *   File URL/path that frontend can use to view/download.
-     *
-     * filename:
-     *   Saved filename on server.
-     *
-     * originalName:
-     *   Original name of the uploaded file.
-     *
-     * fileType:
-     *   MIME type, e.g. application/pdf, image/png.
-     *
-     * size:
-     *   File size in bytes.
-     *
-     * uploadedBy:
-     *   User ID who uploaded the file.
-     *
-     * uploadedAt:
-     *   Upload timestamp.
-     */
-
     attachments: [
       {
         url: {
@@ -181,26 +152,53 @@ const TaskSchema = new mongoose.Schema(
       },
     ],
   },
-
-  { timestamps: true }
+  {
+    timestamps: true,
+  }
 );
 
-// Indexes for query performance
+/*
+ * =========================================================
+ * PERFORMANCE INDEXES
+ * =========================================================
+ */
 
-TaskSchema.index({ assignedTo: 1, createdAt: -1 });
+// Dashboard / recent tasks
+TaskSchema.index({
+  createdAt: -1,
+});
 
-TaskSchema.index({ createdBy: 1, createdAt: -1 });
+// User-specific task lists
+TaskSchema.index({
+  assignedTo: 1,
+  createdAt: -1,
+});
 
-TaskSchema.index({ contact: 1 });
+TaskSchema.index({
+  createdBy: 1,
+  createdAt: -1,
+});
 
-TaskSchema.index({ contactId: 1 });
+// Contact-based task lookups
+TaskSchema.index({
+  contact: 1,
+});
 
-TaskSchema.index({ status: 1 });
+TaskSchema.index({
+  contactId: 1,
+});
 
-TaskSchema.index({ priority: 1 });
+// Task filtering
+TaskSchema.index({
+  status: 1,
+});
 
-TaskSchema.index({ dueDate: 1 });
+TaskSchema.index({
+  priority: 1,
+});
 
-TaskSchema.index({ createdAt: -1 });
+TaskSchema.index({
+  dueDate: 1,
+});
 
 module.exports = mongoose.model('Task', TaskSchema);

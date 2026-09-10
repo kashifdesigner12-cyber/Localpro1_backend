@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 const Notification = require('../models/Notification');
 
 const isValidObjectId = (id) =>
-  mongoose.Types.ObjectId.isValid(id);
+  Boolean(id) && mongoose.Types.ObjectId.isValid(id);
 
 // ============================================================
 // VALID NOTIFICATION TYPES
@@ -84,34 +84,6 @@ const safeNotification = (notification) => {
 // ============================================================
 // INTERNAL CREATE NOTIFICATION
 // ============================================================
-//
-// Supports both:
-//
-// createNotification({
-//   userId,
-//   type,
-//   title,
-//   message,
-//   relatedId,
-//   relatedType,
-//   actionUrl,
-//   metadata
-// })
-//
-// OR:
-//
-// createNotification(
-//   userId,
-//   type,
-//   title,
-//   message,
-//   relatedId,
-//   relatedType,
-//   actionUrl,
-//   metadata
-// )
-//
-// ============================================================
 
 const createNotification = async (
   paramsOrUserId,
@@ -125,10 +97,6 @@ const createNotification = async (
 ) => {
   try {
     let payload = {};
-
-    // ========================================================
-    // OBJECT ARGUMENT
-    // ========================================================
 
     if (
       paramsOrUserId &&
@@ -170,13 +138,7 @@ const createNotification = async (
           paramsOrUserId.metadata ||
           {}
       };
-    }
-
-    // ========================================================
-    // POSITIONAL ARGUMENTS
-    // ========================================================
-
-    else {
+    } else {
       payload = {
         user:
           paramsOrUserId &&
@@ -214,15 +176,10 @@ const createNotification = async (
       };
     }
 
-    // ========================================================
-    // USER VALIDATION
-    // ========================================================
-
     if (!payload.user) {
       console.error(
         'createNotification: user is required'
       );
-
       return null;
     }
 
@@ -234,13 +191,8 @@ const createNotification = async (
       console.error(
         'createNotification: invalid user ID'
       );
-
       return null;
     }
-
-    // ========================================================
-    // TYPE VALIDATION
-    // ========================================================
 
     if (
       !VALID_TYPES.includes(
@@ -250,13 +202,8 @@ const createNotification = async (
       console.error(
         `createNotification: Invalid notification type "${payload.type}"`
       );
-
       return null;
     }
-
-    // ========================================================
-    // TITLE VALIDATION
-    // ========================================================
 
     if (
       !payload.title ||
@@ -265,13 +212,8 @@ const createNotification = async (
       console.error(
         'createNotification: title is required'
       );
-
       return null;
     }
-
-    // ========================================================
-    // MESSAGE VALIDATION
-    // ========================================================
 
     if (
       !payload.message ||
@@ -280,13 +222,8 @@ const createNotification = async (
       console.error(
         'createNotification: message is required'
       );
-
       return null;
     }
-
-    // ========================================================
-    // RELATED TYPE VALIDATION
-    // ========================================================
 
     if (
       payload.relatedType &&
@@ -297,13 +234,8 @@ const createNotification = async (
       console.error(
         `createNotification: Invalid relatedType "${payload.relatedType}"`
       );
-
       return null;
     }
-
-    // ========================================================
-    // CREATE NOTIFICATION
-    // ========================================================
 
     const notification =
       await Notification.create({
@@ -341,36 +273,16 @@ const createNotification = async (
 
     return notification;
   } catch (error) {
-    // Notification failure must NOT break
-    // the main application operation.
-
     console.error(
       'createNotification error:',
       error.message
     );
-
     return null;
   }
 };
 
 // ============================================================
 // ATTENDANCE NOTIFICATION
-// ============================================================
-//
-// Sent to USER when attendance window opens.
-//
-// Example:
-//
-// 09:00
-// ↓
-// Attendance notification
-// ↓
-// User opens notification
-// ↓
-// /user/attendance
-// ↓
-// User clicks Mark Attendance
-//
 // ============================================================
 
 const createAttendanceNotification = async ({
@@ -399,9 +311,6 @@ const createAttendanceNotification = async ({
       relatedId:
         attendanceId,
 
-      // IMPORTANT:
-      // Notification model expects "Attendance"
-      // with capital A.
       relatedType:
         'Attendance',
 
@@ -414,17 +323,12 @@ const createAttendanceNotification = async ({
       'createAttendanceNotification error:',
       error.message
     );
-
     return null;
   }
 };
 
 // ============================================================
 // ATTENDANCE MARKED NOTIFICATION
-// ============================================================
-//
-// Sent to admin/manager when user marks attendance.
-//
 // ============================================================
 
 const notifyAttendanceMarked = async ({
@@ -498,7 +402,6 @@ const notifyAttendanceMarked = async ({
       'notifyAttendanceMarked error:',
       error.message
     );
-
     return null;
   }
 };
@@ -521,18 +424,13 @@ const getNotifications = async (
       limit = 20
     } = req.query;
 
+    const currentUserId = req.user._id;
+
     const filter = {
-      user:
-        req.user._id
+      user: currentUserId
     };
 
-    // ========================================================
-    // READ FILTER
-    // ========================================================
-
-    if (
-      isRead !== undefined
-    ) {
+    if (isRead !== undefined) {
       if (
         isRead !== 'true' &&
         isRead !== 'false'
@@ -547,10 +445,6 @@ const getNotifications = async (
       filter.isRead =
         isRead === 'true';
     }
-
-    // ========================================================
-    // TYPE FILTER
-    // ========================================================
 
     if (type) {
       if (
@@ -569,17 +463,13 @@ const getNotifications = async (
         type;
     }
 
-    // ========================================================
-    // SEARCH
-    // ========================================================
-
     if (
       search &&
       search.trim()
     ) {
       const regex =
         new RegExp(
-          search.trim(),
+          search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
           'i'
         );
 
@@ -593,14 +483,10 @@ const getNotifications = async (
       ];
     }
 
-    // ========================================================
-    // PAGINATION
-    // ========================================================
-
     const pageNum =
       Math.max(
         1,
-        parseInt(page) || 1
+        parseInt(page, 10) || 1
       );
 
     const limitNum =
@@ -608,7 +494,7 @@ const getNotifications = async (
         100,
         Math.max(
           1,
-          parseInt(limit) || 20
+          parseInt(limit, 10) || 20
         )
       );
 
@@ -616,10 +502,7 @@ const getNotifications = async (
       (pageNum - 1) *
       limitNum;
 
-    // ========================================================
-    // DATABASE
-    // ========================================================
-
+    // Optimized: Run find with lean and parallelize unread count
     const [
       notifications,
       total,
@@ -633,18 +516,16 @@ const getNotifications = async (
             createdAt: -1
           })
           .skip(skip)
-          .limit(limitNum),
+          .limit(limitNum)
+          .lean(),
 
         Notification.countDocuments(
           filter
         ),
 
         Notification.countDocuments({
-          user:
-            req.user._id,
-
-          isRead:
-            false
+          user: currentUserId,
+          isRead: false
         })
       ]);
 
@@ -652,10 +533,6 @@ const getNotifications = async (
       notifications.map(
         safeNotification
       );
-
-    // ========================================================
-    // RESPONSE
-    // ========================================================
 
     return res.status(200).json({
       success: true,
@@ -764,7 +641,7 @@ const getNotificationById =
       const notification =
         await Notification.findById(
           id
-        );
+        ).lean();
 
       if (!notification) {
         return res.status(404).json({
@@ -774,7 +651,6 @@ const getNotificationById =
         });
       }
 
-      // User can only see own notification
       if (
         notification.user.toString() !==
         req.user._id.toString()
@@ -810,10 +686,6 @@ const getNotificationById =
 
 // ============================================================
 // MARK SINGLE NOTIFICATION AS READ
-//
-// PUT/PATCH /api/notifications/:id/read
-// PATCH       /api/notifications/:id
-//
 // ============================================================
 
 const markAsRead = async (
@@ -836,40 +708,35 @@ const markAsRead = async (
     }
 
     const notification =
-      await Notification.findById(
-        id
-      );
+      await Notification.findOneAndUpdate(
+        {
+          _id: id,
+          user: req.user._id
+        },
+        {
+          $set: {
+            isRead: true,
+            readAt: new Date()
+          }
+        },
+        { new: true }
+      ).lean();
 
     if (!notification) {
-      return res.status(404).json({
-        success: false,
-        message:
-          'Notification not found.'
-      });
-    }
+      // Check if it exists for another user or doesn't exist
+      const exists = await Notification.exists({ _id: id });
+      if (!exists) {
+        return res.status(404).json({
+          success: false,
+          message: 'Notification not found.'
+        });
+      }
 
-    // User can only update own notification
-    if (
-      notification.user.toString() !==
-      req.user._id.toString()
-    ) {
       return res.status(403).json({
         success: false,
         message:
           'Access denied. You can only update your own notifications.'
       });
-    }
-
-    if (
-      !notification.isRead
-    ) {
-      notification.isRead =
-        true;
-
-      notification.readAt =
-        new Date();
-
-      await notification.save();
     }
 
     return res.status(200).json({
@@ -899,10 +766,6 @@ const markAsRead = async (
 
 // ============================================================
 // MARK ALL AS READ
-//
-// PUT/PATCH /read-all
-// PUT/PATCH /mark-all-read
-//
 // ============================================================
 
 const markAllAsRead = async (
@@ -992,7 +855,7 @@ const deleteNotification =
       const notification =
         await Notification.findById(
           id
-        );
+        ).select('user').lean();
 
       if (!notification) {
         return res.status(404).json({

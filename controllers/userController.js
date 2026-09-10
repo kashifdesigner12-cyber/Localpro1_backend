@@ -16,12 +16,10 @@ const PAK_TIMEZONE = "Asia/Karachi";
 const normalizeUserId = (value) => {
   if (!value) return null;
 
-  // MongoDB ObjectId
   if (value instanceof mongoose.Types.ObjectId) {
     return value.toString();
   }
 
-  // Object / populated user
   if (typeof value === "object") {
     if (value._id) {
       return normalizeUserId(value._id);
@@ -190,6 +188,12 @@ const safeUser = (user) => {
     user._id || user.id
   );
 
+  // Prevent payload bloating from massive base64 image strings
+  let cleanAvatar = user.avatar || null;
+  if (typeof cleanAvatar === "string" && cleanAvatar.startsWith("data:image") && cleanAvatar.length > 1000) {
+    cleanAvatar = null;
+  }
+
   return {
     id: userId,
     _id: userId,
@@ -202,7 +206,7 @@ const safeUser = (user) => {
     status: user.status || "Active",
     isActive: user.isActive !== undefined ? user.isActive : true,
 
-    avatar: user.avatar || null,
+    avatar: cleanAvatar,
 
     twilioPhoneNumber:
       user.twilioPhoneNumber || "",
@@ -421,14 +425,15 @@ const getUsers = async (req, res) => {
 
     const sortOption = parseSort(sort);
 
-    // DATABASE
+    // Parallel execution with .lean() to prevent memory lag
     const [users, total] =
       await Promise.all([
         User.find(filter)
           .select("-password")
           .skip(skip)
           .limit(limitNum)
-          .sort(sortOption),
+          .sort(sortOption)
+          .lean(),
 
         User.countDocuments(filter),
       ]);
@@ -566,7 +571,9 @@ const getUserById = async (req, res) => {
     const user =
       await User.findById(
         getObjectId(userId)
-      ).select("-password");
+      )
+        .select("-password")
+        .lean();
 
     if (!user) {
       return res.status(404).json({
@@ -626,7 +633,6 @@ const createUser = async (req, res) => {
       attendanceSettings,
     } = req.body;
 
-    // NAME
     if (
       !name ||
       typeof name !== "string" ||
@@ -638,7 +644,6 @@ const createUser = async (req, res) => {
       });
     }
 
-    // EMAIL
     if (
       !email ||
       typeof email !== "string" ||
@@ -661,7 +666,6 @@ const createUser = async (req, res) => {
       });
     }
 
-    // PASSWORD
     if (
       !password ||
       typeof password !== "string"
@@ -681,7 +685,6 @@ const createUser = async (req, res) => {
       });
     }
 
-    // ROLE
     const normalizedRole =
       normalizeRole(role);
 
@@ -693,7 +696,6 @@ const createUser = async (req, res) => {
       });
     }
 
-    // STATUS
     let normalizedStatus =
       normalizeStatus(status);
 
@@ -701,7 +703,6 @@ const createUser = async (req, res) => {
       normalizedStatus = "Active";
     }
 
-    // MANAGER RESTRICTION
     if (
       req.user.role === "manager" &&
       (
@@ -716,11 +717,10 @@ const createUser = async (req, res) => {
       });
     }
 
-    // EXISTING USER
     const existingUser =
       await User.findOne({
         email: normalizedEmail,
-      });
+      }).select("_id").lean();
 
     if (existingUser) {
       return res.status(400).json({
@@ -730,14 +730,12 @@ const createUser = async (req, res) => {
       });
     }
 
-    // PREFERENCES PAYLOAD MERGE
     const finalPreferences = {
       ...(preferences && typeof preferences === "object" ? preferences : {}),
       ...(attendanceSchedule ? { attendanceSchedule } : {}),
       ...(workSchedule ? { workSchedule } : {}),
     };
 
-    // CREATE
     const user = await User.create({
       name: name.trim(),
 
@@ -778,14 +776,10 @@ const createUser = async (req, res) => {
           : undefined,
     });
 
-    // ============================================================
-    // SEND WELCOME EMAIL WITH LOGIN CREDENTIALS TO NEW USER
-    // ============================================================
     try {
       await sendWelcomeEmail(user.email, user.name, password);
-      console.log(`📧 Welcome email dispatched to new user: ${user.email}`);
     } catch (emailErr) {
-      console.error("❌ Failed to send welcome email to new user:", emailErr.message);
+      console.error("Failed to send welcome email to new user:", emailErr.message);
     }
 
     const safeUserData =
@@ -900,7 +894,6 @@ const updateUser = async (req, res) => {
     const isManager =
       req.user.role === "manager";
 
-    // ACCESS CONTROL
     if (
       !isAdmin &&
       !isManager &&
@@ -913,7 +906,6 @@ const updateUser = async (req, res) => {
       });
     }
 
-    // REGULAR USER
     if (
       !isAdmin &&
       !isManager &&
@@ -950,7 +942,6 @@ const updateUser = async (req, res) => {
       }
     }
 
-    // MANAGER TARGET
     if (
       isManager &&
       (
@@ -968,7 +959,6 @@ const updateUser = async (req, res) => {
       });
     }
 
-    // MANAGER SELF ROLE
     if (
       isManager &&
       isSelf &&
@@ -1040,7 +1030,7 @@ const updateUser = async (req, res) => {
             _id: {
               $ne: user._id,
             },
-          });
+          }).select("_id").lean();
 
         if (existingUser) {
           return res.status(400).json({
@@ -1199,10 +1189,9 @@ const updateUser = async (req, res) => {
       };
     }
 
-    // TRACK SCHEDULE CHANGES FOR LIVE SYNC
     let targetSchedulePayload = null;
 
-    // PREFERENCES & NESTED SCHEDULE
+    // PREFERENCES
     if (
       preferences !== undefined &&
       preferences !== null &&
@@ -1225,7 +1214,6 @@ const updateUser = async (req, res) => {
       }
     }
 
-    // DIRECT ATTENDANCE SCHEDULE
     if (attendanceSchedule !== undefined) {
       user.attendanceSchedule = attendanceSchedule;
       user.preferences = {
@@ -1235,7 +1223,6 @@ const updateUser = async (req, res) => {
       targetSchedulePayload = attendanceSchedule;
     }
 
-    // DIRECT WORK SCHEDULE
     if (workSchedule !== undefined) {
       user.workSchedule = workSchedule;
       user.preferences = {
@@ -1247,7 +1234,6 @@ const updateUser = async (req, res) => {
       }
     }
 
-    // ATTENDANCE SETTINGS
     if (
       attendanceSettings !== undefined &&
       attendanceSettings !== null &&
@@ -1259,14 +1245,12 @@ const updateUser = async (req, res) => {
       };
     }
 
-    // Mark Mixed / nested objects modified for Mongoose persistence
     user.markModified("preferences");
     user.markModified("attendanceSchedule");
     user.markModified("workSchedule");
     user.markModified("attendanceSettings");
     user.markModified("business");
 
-    // NOTIFICATION PREFERENCES
     if (
       notificationPreferences !==
         undefined &&
@@ -1282,7 +1266,6 @@ const updateUser = async (req, res) => {
       };
     }
 
-    // INTEGRATIONS
     if (
       integrations !== undefined &&
       integrations !== null &&
@@ -1296,9 +1279,6 @@ const updateUser = async (req, res) => {
 
     await user.save();
 
-    // ============================================================
-    // CRITICAL: LIVE SYNC TODAY'S ATTENDANCE RECORD
-    // ============================================================
     if (targetSchedulePayload) {
       await syncTodayAttendanceSchedule(user, targetSchedulePayload);
     }
@@ -1716,7 +1696,7 @@ const deleteUser = async (
     const user =
       await User.findById(
         getObjectId(userId)
-      );
+      ).select("_id").lean();
 
     if (!user) {
       return res.status(404).json({
@@ -1725,22 +1705,20 @@ const deleteUser = async (
       });
     }
 
-    // DELETE ATTENDANCE & NOTIFICATIONS
+    // Parallel clean up
     try {
-      await Attendance.deleteMany({ user: user._id });
-      await Notification.deleteMany({
-        user: user._id,
-      });
+      await Promise.all([
+        Attendance.deleteMany({ user: user._id }),
+        Notification.deleteMany({ user: user._id }),
+        User.findByIdAndDelete(getObjectId(userId)),
+      ]);
     } catch (cleanupError) {
       console.error(
         "Cleanup error:",
         cleanupError
       );
+      await User.findByIdAndDelete(getObjectId(userId));
     }
-
-    await User.findByIdAndDelete(
-      getObjectId(userId)
-    );
 
     return res.status(200).json({
       success: true,
@@ -1780,7 +1758,9 @@ const getProfile = async (
     }
 
     const authenticatedUserId = getAuthenticatedUserId(req);
-    const user = await User.findById(getObjectId(authenticatedUserId));
+    const user = await User.findById(getObjectId(authenticatedUserId))
+      .select("-password")
+      .lean();
 
     const safeUserData =
       safeUser(user || req.user);
@@ -1865,7 +1845,6 @@ const updateProfile = async (
       });
     }
 
-    // NAME
     if (name !== undefined) {
       if (
         !name ||
@@ -1883,7 +1862,6 @@ const updateProfile = async (
         name.trim();
     }
 
-    // PHONE
     if (phone !== undefined) {
       user.phone =
         typeof phone === "string"
@@ -1891,13 +1869,11 @@ const updateProfile = async (
           : "";
     }
 
-    // AVATAR
     if (avatar !== undefined) {
       user.avatar =
         avatar || null;
     }
 
-    // BUSINESS
     if (
       business !== undefined &&
       business !== null &&
@@ -1909,10 +1885,8 @@ const updateProfile = async (
       };
     }
 
-    // TRACK SCHEDULE CHANGES FOR LIVE SYNC
     let targetSchedulePayload = null;
 
-    // PREFERENCES
     if (
       preferences !== undefined &&
       preferences !== null &&
@@ -1935,7 +1909,6 @@ const updateProfile = async (
       }
     }
 
-    // DIRECT SCHEDULES ON PROFILE UPDATE
     if (attendanceSchedule !== undefined) {
       user.attendanceSchedule = attendanceSchedule;
       user.preferences = {
@@ -1973,7 +1946,6 @@ const updateProfile = async (
     user.markModified("attendanceSettings");
     user.markModified("business");
 
-    // NOTIFICATION PREFERENCES
     if (
       notificationPreferences !==
         undefined &&
@@ -1991,7 +1963,6 @@ const updateProfile = async (
 
     await user.save();
 
-    // LIVE SYNC ATTENDANCE
     if (targetSchedulePayload) {
       await syncTodayAttendanceSchedule(user, targetSchedulePayload);
     }
@@ -2218,8 +2189,6 @@ module.exports = {
   updateProfile,
   changePassword,
 
-  // Export helpers so attendance controller
-  // can use the same ID normalization if needed.
   normalizeUserId,
   isValidObjectId,
   getObjectId,
