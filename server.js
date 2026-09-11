@@ -157,19 +157,19 @@ app.use(
 app.use(cookieParser());
 
 // =====================================================
-// BODY PARSERS
+// BODY PARSERS (Increased limit to 50mb for base64 profile pictures)
 // =====================================================
 
 app.use(
   express.json({
-    limit: "25mb",
+    limit: "50mb",
   })
 );
 
 app.use(
   express.urlencoded({
     extended: true,
-    limit: "25mb",
+    limit: "50mb",
   })
 );
 

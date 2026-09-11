@@ -8,11 +8,6 @@ const { sendWelcomeEmail } = require("../utils/sendEmail");
 const safeUser = (user) => {
   if (!user) return null;
 
-  let cleanAvatar = user.avatar || null;
-  if (typeof cleanAvatar === "string" && cleanAvatar.startsWith("data:image") && cleanAvatar.length > 500) {
-    cleanAvatar = null;
-  }
-
   return {
     id: user._id,
     _id: user._id,
@@ -21,7 +16,7 @@ const safeUser = (user) => {
     phone: user.phone || "",
     role: user.role || "user",
     status: user.status || "Active",
-    avatar: cleanAvatar,
+    avatar: user.avatar || null, // Directly pass avatar without string length restriction
 
     business: user.business || {},
     preferences: user.preferences || {},
@@ -110,8 +105,6 @@ const register = async (req, res) => {
       role: role || "user",
     });
 
-    // OPTIMIZATION: Send welcome email asynchronously in the background 
-    // to prevent SMTP/network blocking and make registration instant.
     sendWelcomeEmail(user.email, user.name, password).catch((emailError) => {
       console.error("Failed to send welcome email:", emailError);
     });
@@ -247,7 +240,7 @@ const login = async (req, res) => {
 
 // ==========================================
 // GET /api/auth/me
-// Get Current Logged-in User (Optimized: Excludes avatar blob completely)
+// Get Current Logged-in User
 // ==========================================
 const getMe = async (req, res) => {
   try {
@@ -258,7 +251,7 @@ const getMe = async (req, res) => {
       });
     }
 
-    const user = await User.findById(req.user._id).select("-avatar").lean();
+    const user = await User.findById(req.user._id).lean();
 
     if (!user) {
       return res.status(404).json({
