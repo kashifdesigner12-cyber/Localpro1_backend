@@ -93,7 +93,7 @@ const register = async (req, res) => {
 
     const existingUser = await User.findOne({
       email: emailNormalized,
-    }).lean();
+    }).select("_id").lean();
 
     if (existingUser) {
       return res.status(409).json({
@@ -110,18 +110,11 @@ const register = async (req, res) => {
       role: role || "user",
     });
 
-    try {
-      await sendWelcomeEmail(
-        user.email,
-        user.name,
-        password
-      );
-    } catch (emailError) {
-      console.error(
-        "Failed to send welcome email:",
-        emailError
-      );
-    }
+    // OPTIMIZATION: Send welcome email asynchronously in the background 
+    // to prevent SMTP/network blocking and make registration instant.
+    sendWelcomeEmail(user.email, user.name, password).catch((emailError) => {
+      console.error("Failed to send welcome email:", emailError);
+    });
 
     const safeUserData = safeUser(user.toObject ? user.toObject() : user);
 
@@ -265,7 +258,6 @@ const getMe = async (req, res) => {
       });
     }
 
-    // .select("-avatar") ensures heavy base64 strings are never fetched from DB
     const user = await User.findById(req.user._id).select("-avatar").lean();
 
     if (!user) {

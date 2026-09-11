@@ -143,6 +143,10 @@ app.use(
     exposedHeaders: [
       "Content-Disposition",
     ],
+
+    // OPTIMIZATION: Cache preflight options requests for 10 minutes (600 seconds) 
+    // to completely eliminate repeated preflight network round-trips before actual API calls.
+    maxAge: 600,
   })
 );
 

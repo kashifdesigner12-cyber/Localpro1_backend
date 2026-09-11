@@ -146,16 +146,22 @@ const syncTodayAttendanceSchedule = async (user, schedule) => {
     const existingAttendance = await Attendance.findOne({
       user: user._id,
       date: { $gte: start, $lte: end },
-    });
+    }).lean();
 
     if (existingAttendance) {
       if (existingAttendance.status !== "Present" && !existingAttendance.checkIn) {
-        existingAttendance.scheduledTime = schedTimeObj;
-        existingAttendance.windowStart = winStartObj;
-        existingAttendance.windowEnd = winEndObj;
-        existingAttendance.status = "Pending";
-        existingAttendance.markedAt = null;
-        await existingAttendance.save();
+        await Attendance.updateOne(
+          { _id: existingAttendance._id },
+          {
+            $set: {
+              scheduledTime: schedTimeObj,
+              windowStart: winStartObj,
+              windowEnd: winEndObj,
+              status: "Pending",
+              markedAt: null,
+            },
+          }
+        );
       }
     } else if (user.role === "user" && user.status === "Active") {
       await Attendance.create({
@@ -188,7 +194,6 @@ const safeUser = (user) => {
     user._id || user.id
   );
 
-  // Prevent payload bloating from massive base64 image strings
   let cleanAvatar = user.avatar || null;
   if (typeof cleanAvatar === "string" && cleanAvatar.startsWith("data:image") && cleanAvatar.length > 1000) {
     cleanAvatar = null;
@@ -425,7 +430,7 @@ const getUsers = async (req, res) => {
 
     const sortOption = parseSort(sort);
 
-    // Parallel execution with .lean() to prevent memory lag
+    // OPTIMIZATION: Use .lean() and projection fields or parallel execution with indices
     const [users, total] =
       await Promise.all([
         User.find(filter)
@@ -476,32 +481,19 @@ const getUsers = async (req, res) => {
 
 const getUserStats = async (req, res) => {
   try {
-    const [
-      totalUsers,
-      activeUsers,
-      pendingUsers,
-      blockedUsers,
-      inactiveUsers,
-      byRole,
-    ] = await Promise.all([
-      User.countDocuments(),
-
-      User.countDocuments({
-        status: "Active",
-      }),
-
-      User.countDocuments({
-        status: "Pending",
-      }),
-
-      User.countDocuments({
-        status: "Blocked",
-      }),
-
-      User.countDocuments({
-        status: "Inactive",
-      }),
-
+    // OPTIMIZATION: Combine queries using MongoDB aggregation stats to prevent multiple round-trips
+    const [statsResult, byRoleResult] = await Promise.all([
+      User.aggregate([
+        {
+          $facet: {
+            total: [{ $count: "count" }],
+            active: [{ $match: { status: "Active" } }, { $count: "count" }],
+            pending: [{ $match: { status: "Pending" } }, { $count: "count" }],
+            blocked: [{ $match: { status: "Blocked" } }, { $count: "count" }],
+            inactive: [{ $match: { status: "Inactive" } }, { $count: "count" }],
+          },
+        },
+      ]),
       User.aggregate([
         {
           $group: {
@@ -514,13 +506,14 @@ const getUserStats = async (req, res) => {
       ]),
     ]);
 
+    const facet = statsResult[0] || {};
     const stats = {
-      total: totalUsers,
-      active: activeUsers,
-      pending: pendingUsers,
-      blocked: blockedUsers,
-      inactive: inactiveUsers,
-      byRole,
+      total: facet.total?.[0]?.count || 0,
+      active: facet.active?.[0]?.count || 0,
+      pending: facet.pending?.[0]?.count || 0,
+      blocked: facet.blocked?.[0]?.count || 0,
+      inactive: facet.inactive?.[0]?.count || 0,
+      byRole: byRoleResult,
     };
 
     return res.status(200).json({
@@ -2081,7 +2074,7 @@ const changePassword = async (
       )
     ) {
       return res.status(400).json({
-        success: false,
+        string: false,
         message:
           "Invalid authenticated user ID.",
       });

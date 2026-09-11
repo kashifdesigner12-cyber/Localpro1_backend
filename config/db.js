@@ -1,10 +1,20 @@
 const mongoose = require("mongoose");
 
 // =====================================================
+// MongoDB Connection Caching for Serverless / Hot-Reload
+// =====================================================
+let cachedConnection = null;
+
+// =====================================================
 // MongoDB Connection
 // =====================================================
 
 const connectDB = async () => {
+  // If connection is already established, reuse it instantly to eliminate 20s delay
+  if (cachedConnection && mongoose.connection.readyState === 1) {
+    return cachedConnection;
+  }
+
   try {
     const isProduction =
       process.env.NODE_ENV === "production";
@@ -105,6 +115,8 @@ const connectDB = async () => {
       }
     );
 
+    cachedConnection = conn;
+
     // =================================================
     // Connection successful
     // =================================================
@@ -194,6 +206,7 @@ mongoose.connection.on(
     console.warn(
       "Mongoose: MongoDB disconnected."
     );
+    cachedConnection = null;
   }
 );
 
@@ -207,6 +220,7 @@ const closeMongoDB = async () => {
       mongoose.connection.readyState !== 0
     ) {
       await mongoose.connection.close();
+      cachedConnection = null;
 
       console.log(
         "MongoDB connection closed."
