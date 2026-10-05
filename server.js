@@ -23,7 +23,18 @@ const express = require("express");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const multer = require("multer");
+
 const connectDB = require("./config/db");
+
+// =====================================================
+// ATTENDANCE EMAIL SCHEDULER
+// =====================================================
+
+const {
+  startAttendanceEmailScheduler,
+  stopAttendanceEmailScheduler,
+  sendDailyAttendanceEmails,
+} = require("./services/attendanceEmailScheduler");
 
 // =====================================================
 // APP SETUP
@@ -144,8 +155,8 @@ app.use(
       "Content-Disposition",
     ],
 
-    // OPTIMIZATION: Cache preflight options requests for 10 minutes (600 seconds) 
-    // to completely eliminate repeated preflight network round-trips before actual API calls.
+    // Cache preflight OPTIONS requests
+    // for 10 minutes.
     maxAge: 600,
   })
 );
@@ -157,7 +168,8 @@ app.use(
 app.use(cookieParser());
 
 // =====================================================
-// BODY PARSERS (Increased limit to 50mb for base64 profile pictures)
+// BODY PARSERS
+// Increased limit to 50mb for base64 profile pictures
 // =====================================================
 
 app.use(
@@ -204,6 +216,57 @@ app.get("/health", (req, res) => {
     timestamp: new Date(),
   });
 });
+
+// =====================================================
+// MANUAL ATTENDANCE EMAIL SENDER
+// =====================================================
+//
+// Permanent manual endpoint.
+// Sends attendance reminder emails immediately
+// to all active users who have an email address.
+//
+// Method:
+// POST /api/send-attendance-reminders
+//
+// =====================================================
+
+app.post(
+  "/api/send-attendance-reminders",
+  async (req, res) => {
+    try {
+      console.log(
+        "[Attendance Email] Manual sending started..."
+      );
+
+      const result =
+        await sendDailyAttendanceEmails();
+
+      console.log(
+        "[Attendance Email] Manual sending completed:",
+        result
+      );
+
+      return res.status(200).json({
+        success: true,
+        message:
+          "Attendance reminder emails sent successfully.",
+        result,
+      });
+    } catch (error) {
+      console.error(
+        "[Attendance Email] Manual sending error:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message:
+          "Failed to send attendance reminder emails.",
+        error: error.message,
+      });
+    }
+  }
+);
 
 // =====================================================
 // API ROUTES
@@ -387,12 +450,17 @@ app.use((error, req, res, next) => {
 });
 
 // =====================================================
-// DATABASE + SERVER
+// SERVER CONFIGURATION
 // =====================================================
 
 const PORT = process.env.PORT || 5000;
 
 let attendanceScheduler = null;
+let attendanceEmailSchedulerStarted = false;
+
+// =====================================================
+// ATTENDANCE SCHEDULER
+// =====================================================
 
 const startAttendanceScheduler = () => {
   try {
@@ -411,8 +479,19 @@ const startAttendanceScheduler = () => {
       return;
     }
 
-    // Run initial processing in the background.
-    // Do not block the HTTP server from starting.
+    // Prevent duplicate scheduler
+    if (attendanceScheduler) {
+      console.warn(
+        "[Attendance] Scheduler is already running."
+      );
+
+      return;
+    }
+
+    // -------------------------------------------------
+    // Initial processing
+    // -------------------------------------------------
+
     Promise.resolve()
       .then(() => {
         console.log(
@@ -434,7 +513,10 @@ const startAttendanceScheduler = () => {
         );
       });
 
-    // Run every 60 seconds.
+    // -------------------------------------------------
+    // Run every 60 seconds
+    // -------------------------------------------------
+
     attendanceScheduler = setInterval(async () => {
       try {
         const result =
@@ -463,24 +545,118 @@ const startAttendanceScheduler = () => {
   }
 };
 
+// =====================================================
+// ATTENDANCE EMAIL SCHEDULER
+// =====================================================
+
+const startAttendanceEmailSchedulerSafe = () => {
+  try {
+    if (
+      typeof startAttendanceEmailScheduler !==
+      "function"
+    ) {
+      console.warn(
+        "[Attendance Email] Scheduler function is not available."
+      );
+
+      return;
+    }
+
+    // Prevent duplicate scheduler
+    if (attendanceEmailSchedulerStarted) {
+      console.warn(
+        "[Attendance Email] Scheduler is already running."
+      );
+
+      return;
+    }
+
+    startAttendanceEmailScheduler();
+
+    attendanceEmailSchedulerStarted = true;
+
+    console.log(
+      "[Attendance Email] Scheduler started."
+    );
+  } catch (error) {
+    console.error(
+      "[Attendance Email] Failed to start scheduler:",
+      error
+    );
+  }
+};
+
+// =====================================================
+// STOP ATTENDANCE EMAIL SCHEDULER
+// =====================================================
+
+const stopAttendanceEmailSchedulerSafe = () => {
+  try {
+    if (
+      typeof stopAttendanceEmailScheduler !==
+      "function"
+    ) {
+      return;
+    }
+
+    stopAttendanceEmailScheduler();
+
+    attendanceEmailSchedulerStarted = false;
+
+    console.log(
+      "[Attendance Email] Scheduler stopped."
+    );
+  } catch (error) {
+    console.error(
+      "[Attendance Email] Failed to stop scheduler:",
+      error
+    );
+  }
+};
+
+// =====================================================
+// START SERVER
+// =====================================================
+
 const startServer = async () => {
   try {
+    // -------------------------------------------------
+    // Connect MongoDB first
+    // -------------------------------------------------
+
     await connectDB();
 
     console.log(
       "[Database] MongoDB connection established."
     );
 
-    // Start HTTP server immediately after DB connection.
+    // -------------------------------------------------
+    // Start HTTP server
+    // -------------------------------------------------
+
     server.listen(PORT, () => {
       console.log(
         `Backend running on http://localhost:${PORT}`
       );
+
+      console.log(
+        `[Environment] ${
+          process.env.NODE_ENV || "development"
+        }`
+      );
     });
 
-    // Start non-critical background work
-    // without blocking the HTTP server.
+    // -------------------------------------------------
+    // Start attendance scheduler
+    // -------------------------------------------------
+
     startAttendanceScheduler();
+
+    // -------------------------------------------------
+    // Start attendance email scheduler
+    // -------------------------------------------------
+
+    startAttendanceEmailSchedulerSafe();
   } catch (error) {
     console.error(
       "Failed to connect to MongoDB:",
@@ -490,6 +666,10 @@ const startServer = async () => {
     process.exit(1);
   }
 };
+
+// =====================================================
+// START APPLICATION
+// =====================================================
 
 startServer();
 
@@ -502,10 +682,12 @@ const shutdown = async (signal) => {
     `${signal} received. Shutting down server...`
   );
 
+  // -------------------------------------------------
+  // Stop attendance scheduler
+  // -------------------------------------------------
+
   if (attendanceScheduler) {
-    clearInterval(
-      attendanceScheduler
-    );
+    clearInterval(attendanceScheduler);
 
     attendanceScheduler = null;
 
@@ -513,6 +695,16 @@ const shutdown = async (signal) => {
       "[Attendance] Scheduler stopped."
     );
   }
+
+  // -------------------------------------------------
+  // Stop attendance email scheduler
+  // -------------------------------------------------
+
+  stopAttendanceEmailSchedulerSafe();
+
+  // -------------------------------------------------
+  // Close HTTP server
+  // -------------------------------------------------
 
   server.close(() => {
     console.log(
@@ -522,6 +714,10 @@ const shutdown = async (signal) => {
     process.exit(0);
   });
 };
+
+// =====================================================
+// PROCESS SIGNALS
+// =====================================================
 
 process.on("SIGINT", () => {
   shutdown("SIGINT");
