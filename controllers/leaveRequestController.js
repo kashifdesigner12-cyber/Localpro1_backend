@@ -2,6 +2,9 @@ const mongoose = require('mongoose');
 const LeaveRequest = require('../models/LeaveRequest');
 const User = require('../models/User');
 const { createNotification } = require('./notificationController');
+const {
+  sendLeaveRequestEmailToAdmin
+} = require('../utils/sendEmail');
 
 const isValidObjectId = (id) =>
   Boolean(id) && mongoose.Types.ObjectId.isValid(id);
@@ -83,10 +86,20 @@ const safeLeaveRequest = (lr) => {
   }
 
   let safeUserObj = null;
+
   if (lr.user) {
-    if (typeof lr.user === 'object' && lr.user._id) {
-      let cleanAvatar = lr.user.avatar || null;
-      if (typeof cleanAvatar === 'string' && cleanAvatar.startsWith('data:image') && cleanAvatar.length > 1000) {
+    if (
+      typeof lr.user === 'object' &&
+      lr.user._id
+    ) {
+      let cleanAvatar =
+        lr.user.avatar || null;
+
+      if (
+        typeof cleanAvatar === 'string' &&
+        cleanAvatar.startsWith('data:image') &&
+        cleanAvatar.length > 1000
+      ) {
         cleanAvatar = null;
       }
 
@@ -104,8 +117,12 @@ const safeLeaveRequest = (lr) => {
   }
 
   let safeReviewerObj = null;
+
   if (lr.reviewedBy) {
-    if (typeof lr.reviewedBy === 'object' && lr.reviewedBy._id) {
+    if (
+      typeof lr.reviewedBy === 'object' &&
+      lr.reviewedBy._id
+    ) {
       safeReviewerObj = {
         id: lr.reviewedBy._id,
         _id: lr.reviewedBy._id,
@@ -229,14 +246,15 @@ const createLeaveRequest = async (req, res) => {
       });
     }
 
-    const leaveRequest = await LeaveRequest.create({
-      user: req.user._id,
-      leaveType: normalizedLeaveType,
-      startDate: start,
-      endDate: end,
-      reason: reason.trim(),
-      status: 'Pending'
-    });
+    const leaveRequest =
+      await LeaveRequest.create({
+        user: req.user._id,
+        leaveType: normalizedLeaveType,
+        startDate: start,
+        endDate: end,
+        reason: reason.trim(),
+        status: 'Pending'
+      });
 
     const populated =
       await LeaveRequest.findById(
@@ -252,12 +270,20 @@ const createLeaveRequest = async (req, res) => {
         )
         .lean();
 
-    // Fast parallel notifications dispatch
+    // =====================================================
+    // FAST PARALLEL IN-APP NOTIFICATIONS
+    // =====================================================
+
     (async () => {
       try {
-        const admins = await User.find({
-          role: { $in: ['admin', 'manager'] }
-        }).select('_id').lean();
+        const admins =
+          await User.find({
+            role: {
+              $in: ['admin', 'manager']
+            }
+          })
+            .select('_id')
+            .lean();
 
         await Promise.allSettled(
           admins.map((admin) =>
@@ -266,11 +292,15 @@ const createLeaveRequest = async (req, res) => {
               type: 'leave',
               title: 'New Leave Request',
               message: `${
-                req.user.name || 'An employee'
+                req.user.name ||
+                'An employee'
               } submitted a ${normalizedLeaveType} leave request.`,
-              relatedId: leaveRequest._id,
-              relatedType: 'LeaveRequest',
-              actionUrl: '/dashboard/leave-requests'
+              relatedId:
+                leaveRequest._id,
+              relatedType:
+                'LeaveRequest',
+              actionUrl:
+                '/dashboard/leave-requests'
             })
           )
         );
@@ -282,7 +312,143 @@ const createLeaveRequest = async (req, res) => {
       }
     })();
 
-    const safeData = safeLeaveRequest(populated);
+    // =====================================================
+    // ADMIN / MANAGER EMAIL NOTIFICATION
+    // =====================================================
+
+    try {
+      console.log(
+        '[Leave Email] Preparing admin/manager email notification...'
+      );
+
+      const admins =
+        await User.find({
+          role: {
+            $in: ['admin', 'manager']
+          },
+          email: {
+            $exists: true,
+            $ne: ''
+          }
+        })
+          .select('_id name email')
+          .lean();
+
+      console.log(
+        '[Leave Email] Admin/manager recipients found:',
+        admins.length
+      );
+
+      if (!admins.length) {
+        console.log(
+          '[Leave Email] No admin/manager with email found.'
+        );
+      } else {
+        const userName =
+          populated?.user?.name ||
+          req.user?.name ||
+          'An employee';
+
+        const userEmail =
+          populated?.user?.email ||
+          req.user?.email ||
+          '';
+
+        const formattedStartDate =
+          start.toLocaleDateString(
+            'en-PK',
+            {
+              year: 'numeric',
+              month: 'long',
+              day: 'numeric'
+            }
+          );
+
+        const formattedEndDate =
+          end.toLocaleDateString(
+            'en-PK',
+            {
+              year: 'numeric',
+              month: 'long',
+              day: 'numeric'
+            }
+          );
+
+        const emailResults =
+          await Promise.allSettled(
+            admins.map((admin) => {
+              console.log(
+                `[Leave Email] Sending email to: ${admin.email}`
+              );
+
+              return sendLeaveRequestEmailToAdmin(
+                admin.email,
+                userName,
+                userEmail,
+                normalizedLeaveType,
+                formattedStartDate,
+                formattedEndDate,
+                reason.trim()
+              );
+            })
+          );
+
+        const successfulEmails =
+          emailResults.filter(
+            (result) =>
+              result.status === 'fulfilled'
+          ).length;
+
+        const failedEmails =
+          emailResults.filter(
+            (result) =>
+              result.status === 'rejected'
+          ).length;
+
+        if (successfulEmails > 0) {
+          await LeaveRequest.findByIdAndUpdate(
+            leaveRequest._id,
+            {
+              adminEmailNotificationSent: true,
+              adminEmailNotificationSentAt:
+                new Date()
+            }
+          );
+        }
+
+        console.log(
+          '[Leave Email] Notification result:',
+          {
+            totalAdmins: admins.length,
+            sent: successfulEmails,
+            failed: failedEmails
+          }
+        );
+
+        emailResults.forEach(
+          (result, index) => {
+            if (
+              result.status === 'rejected'
+            ) {
+              console.error(
+                `[Leave Email] Failed for ${admins[index].email}:`,
+                result.reason
+              );
+            }
+          }
+        );
+      }
+    } catch (emailError) {
+      console.error(
+        '[Leave Email] Notification dispatch error:',
+        emailError
+      );
+    }
+
+    const safeData =
+      safeLeaveRequest(
+        populated
+      );
 
     return res.status(201).json({
       success: true,
@@ -312,7 +478,10 @@ const createLeaveRequest = async (req, res) => {
 |--------------------------------------------------------------------------
 */
 
-const getLeaveRequests = async (req, res) => {
+const getLeaveRequests = async (
+  req,
+  res
+) => {
   try {
     const {
       status,
@@ -329,17 +498,24 @@ const getLeaveRequests = async (req, res) => {
     if (req.user.role === 'user') {
       filter.user = req.user._id;
     } else {
-      const targetUser = userId || user;
+      const targetUser =
+        userId || user;
 
       if (targetUser) {
-        if (!isValidObjectId(targetUser)) {
+        if (
+          !isValidObjectId(
+            targetUser
+          )
+        ) {
           return res.status(400).json({
             success: false,
-            message: 'Invalid userId filter.'
+            message:
+              'Invalid userId filter.'
           });
         }
 
-        filter.user = targetUser;
+        filter.user =
+          targetUser;
       }
     }
 
@@ -358,12 +534,15 @@ const getLeaveRequests = async (req, res) => {
         });
       }
 
-      filter.status = normalizedStatus;
+      filter.status =
+        normalizedStatus;
     }
 
     if (leaveType) {
       const normalizedLeaveType =
-        normalizeLeaveType(leaveType);
+        normalizeLeaveType(
+          leaveType
+        );
 
       if (!normalizedLeaveType) {
         return res.status(400).json({
@@ -376,32 +555,57 @@ const getLeaveRequests = async (req, res) => {
         normalizedLeaveType;
     }
 
-    if (search && search.trim()) {
-      const escaped = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      filter.reason = new RegExp(escaped, 'i');
+    if (
+      search &&
+      search.trim()
+    ) {
+      const escaped =
+        search
+          .trim()
+          .replace(
+            /[.*+?^${}()|[\]\\]/g,
+            '\\$&'
+          );
+
+      filter.reason =
+        new RegExp(
+          escaped,
+          'i'
+        );
     }
 
-    const pageNum = Math.max(
-      1,
-      parseInt(page, 10) || 1
-    );
-
-    const limitNum = Math.min(
-      100,
+    const pageNum =
       Math.max(
         1,
-        parseInt(limit, 10) || 20
-      )
-    );
+        parseInt(
+          page,
+          10
+        ) || 1
+      );
+
+    const limitNum =
+      Math.min(
+        100,
+        Math.max(
+          1,
+          parseInt(
+            limit,
+            10
+          ) || 20
+        )
+      );
 
     const skip =
-      (pageNum - 1) * limitNum;
+      (pageNum - 1) *
+      limitNum;
 
     const [
       leaveRequests,
       total
     ] = await Promise.all([
-      LeaveRequest.find(filter)
+      LeaveRequest.find(
+        filter
+      )
         .populate(
           'user',
           'name email role avatar'
@@ -429,9 +633,12 @@ const getLeaveRequests = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      leaveRequests: safeRequests,
-      requests: safeRequests,
-      data: safeRequests,
+      leaveRequests:
+        safeRequests,
+      requests:
+        safeRequests,
+      data:
+        safeRequests,
 
       pagination: {
         page: pageNum,
@@ -439,7 +646,8 @@ const getLeaveRequests = async (req, res) => {
         total,
         pages:
           Math.ceil(
-            total / limitNum
+            total /
+              limitNum
           ) || 0
       }
     });
@@ -463,131 +671,168 @@ const getLeaveRequests = async (req, res) => {
 |--------------------------------------------------------------------------
 */
 
-const getMyLeaveRequests = async (
-  req,
-  res
-) => {
-  try {
-    const {
-      status,
-      leaveType,
-      page = 1,
-      limit = 20
-    } = req.query;
+const getMyLeaveRequests =
+  async (
+    req,
+    res
+  ) => {
+    try {
+      const {
+        status,
+        leaveType,
+        page = 1,
+        limit = 20
+      } = req.query;
 
-    const filter = {
-      user: req.user._id
-    };
+      const filter = {
+        user: req.user._id
+      };
 
-    if (status) {
-      const normalizedStatus =
-        VALID_STATUSES.find(
-          (item) =>
-            item.toLowerCase() ===
-            String(status).toLowerCase()
+      if (status) {
+        const normalizedStatus =
+          VALID_STATUSES.find(
+            (item) =>
+              item.toLowerCase() ===
+              String(
+                status
+              ).toLowerCase()
+          );
+
+        if (
+          !normalizedStatus
+        ) {
+          return res
+            .status(400)
+            .json({
+              success: false,
+              message: `Invalid status filter. Allowed: ${VALID_STATUSES.join(', ')}.`
+            });
+        }
+
+        filter.status =
+          normalizedStatus;
+      }
+
+      if (leaveType) {
+        const normalizedLeaveType =
+          normalizeLeaveType(
+            leaveType
+          );
+
+        if (
+          !normalizedLeaveType
+        ) {
+          return res
+            .status(400)
+            .json({
+              success: false,
+              message: `Invalid leave type filter. Allowed: ${VALID_LEAVE_TYPES.join(', ')}.`
+            });
+        }
+
+        filter.leaveType =
+          normalizedLeaveType;
+      }
+
+      const pageNum =
+        Math.max(
+          1,
+          parseInt(
+            page,
+            10
+          ) || 1
         );
 
-      if (!normalizedStatus) {
-        return res.status(400).json({
-          success: false,
-          message: `Invalid status filter. Allowed: ${VALID_STATUSES.join(', ')}.`
+      const limitNum =
+        Math.min(
+          100,
+          Math.max(
+            1,
+            parseInt(
+              limit,
+              10
+            ) || 20
+          )
+        );
+
+      const skip =
+        (pageNum - 1) *
+        limitNum;
+
+      const [
+        leaveRequests,
+        total
+      ] =
+        await Promise.all([
+          LeaveRequest.find(
+            filter
+          )
+            .populate(
+              'user',
+              'name email role avatar'
+            )
+            .populate(
+              'reviewedBy',
+              'name email role'
+            )
+            .skip(skip)
+            .limit(
+              limitNum
+            )
+            .sort({
+              createdAt: -1
+            })
+            .lean(),
+
+          LeaveRequest.countDocuments(
+            filter
+          )
+        ]);
+
+      const safeRequests =
+        leaveRequests.map(
+          safeLeaveRequest
+        );
+
+      return res
+        .status(200)
+        .json({
+          success: true,
+          leaveRequests:
+            safeRequests,
+          requests:
+            safeRequests,
+          data:
+            safeRequests,
+
+          pagination: {
+            page:
+              pageNum,
+            limit:
+              limitNum,
+            total,
+            pages:
+              Math.ceil(
+                total /
+                  limitNum
+              ) || 0
+          }
         });
-      }
-
-      filter.status =
-        normalizedStatus;
-    }
-
-    if (leaveType) {
-      const normalizedLeaveType =
-        normalizeLeaveType(leaveType);
-
-      if (!normalizedLeaveType) {
-        return res.status(400).json({
-          success: false,
-          message: `Invalid leave type filter. Allowed: ${VALID_LEAVE_TYPES.join(', ')}.`
-        });
-      }
-
-      filter.leaveType =
-        normalizedLeaveType;
-    }
-
-    const pageNum = Math.max(
-      1,
-      parseInt(page, 10) || 1
-    );
-
-    const limitNum = Math.min(
-      100,
-      Math.max(
-        1,
-        parseInt(limit, 10) || 20
-      )
-    );
-
-    const skip =
-      (pageNum - 1) * limitNum;
-
-    const [
-      leaveRequests,
-      total
-    ] = await Promise.all([
-      LeaveRequest.find(filter)
-        .populate(
-          'user',
-          'name email role avatar'
-        )
-        .populate(
-          'reviewedBy',
-          'name email role'
-        )
-        .skip(skip)
-        .limit(limitNum)
-        .sort({
-          createdAt: -1
-        })
-        .lean(),
-
-      LeaveRequest.countDocuments(
-        filter
-      )
-    ]);
-
-    const safeRequests =
-      leaveRequests.map(
-        safeLeaveRequest
+    } catch (error) {
+      console.error(
+        'getMyLeaveRequests error:',
+        error
       );
 
-    return res.status(200).json({
-      success: true,
-      leaveRequests: safeRequests,
-      requests: safeRequests,
-      data: safeRequests,
-
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        total,
-        pages:
-          Math.ceil(
-            total / limitNum
-          ) || 0
-      }
-    });
-  } catch (error) {
-    console.error(
-      'getMyLeaveRequests error:',
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message:
-        'Server error retrieving leave requests.'
-    });
-  }
-};
+      return res
+        .status(500)
+        .json({
+          success: false,
+          message:
+            'Server error retrieving leave requests.'
+        });
+    }
+  };
 
 /*
 |--------------------------------------------------------------------------
@@ -595,75 +840,98 @@ const getMyLeaveRequests = async (
 |--------------------------------------------------------------------------
 */
 
-const getLeaveRequestById = async (
-  req,
-  res
-) => {
-  try {
-    const { id } = req.params;
+const getLeaveRequestById =
+  async (
+    req,
+    res
+  ) => {
+    try {
+      const { id } =
+        req.params;
 
-    if (!isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message:
-          'Invalid leave request ID.'
-      });
-    }
+      if (
+        !isValidObjectId(id)
+      ) {
+        return res
+          .status(400)
+          .json({
+            success: false,
+            message:
+              'Invalid leave request ID.'
+          });
+      }
 
-    const leaveRequest =
-      await LeaveRequest.findById(id)
-        .populate(
-          'user',
-          'name email role avatar'
+      const leaveRequest =
+        await LeaveRequest.findById(
+          id
         )
-        .populate(
-          'reviewedBy',
-          'name email role'
-        )
-        .lean();
+          .populate(
+            'user',
+            'name email role avatar'
+          )
+          .populate(
+            'reviewedBy',
+            'name email role'
+          )
+          .lean();
 
-    if (!leaveRequest) {
-      return res.status(404).json({
-        success: false,
-        message:
-          'Leave request not found.'
-      });
+      if (!leaveRequest) {
+        return res
+          .status(404)
+          .json({
+            success: false,
+            message:
+              'Leave request not found.'
+          });
+      }
+
+      if (
+        req.user.role ===
+          'user' &&
+        leaveRequest.user &&
+        leaveRequest.user._id.toString() !==
+          req.user._id.toString()
+      ) {
+        return res
+          .status(403)
+          .json({
+            success: false,
+            message:
+              'Access denied. You can only view your own leave requests.'
+          });
+      }
+
+      const safeData =
+        safeLeaveRequest(
+          leaveRequest
+        );
+
+      return res
+        .status(200)
+        .json({
+          success: true,
+          leaveRequest:
+            safeData,
+          request:
+            safeData,
+          data:
+            safeData
+        });
+    } catch (error) {
+      console.error(
+        'getLeaveRequestById error:',
+        error
+      );
+
+      return res
+        .status(500)
+        .json({
+          success: false,
+          message:
+            'Server error retrieving leave request.'
+        });
     }
-
-    if (
-      req.user.role === 'user' &&
-      leaveRequest.user &&
-      leaveRequest.user._id.toString() !==
-        req.user._id.toString()
-    ) {
-      return res.status(403).json({
-        success: false,
-        message:
-          'Access denied. You can only view your own leave requests.'
-      });
-    }
-
-    const safeData = safeLeaveRequest(leaveRequest);
-
-    return res.status(200).json({
-      success: true,
-      leaveRequest: safeData,
-      request: safeData,
-      data: safeData
-    });
-  } catch (error) {
-    console.error(
-      'getLeaveRequestById error:',
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message:
-        'Server error retrieving leave request.'
-    });
-  }
-};
+  };
 
 /*
 |--------------------------------------------------------------------------
@@ -671,199 +939,252 @@ const getLeaveRequestById = async (
 |--------------------------------------------------------------------------
 */
 
-const updateLeaveRequest = async (
-  req,
-  res
-) => {
-  try {
-    const { id } = req.params;
+const updateLeaveRequest =
+  async (
+    req,
+    res
+  ) => {
+    try {
+      const { id } =
+        req.params;
 
-    if (!isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message:
-          'Invalid leave request ID.'
-      });
-    }
+      if (
+        !isValidObjectId(id)
+      ) {
+        return res
+          .status(400)
+          .json({
+            success: false,
+            message:
+              'Invalid leave request ID.'
+          });
+      }
 
-    const leaveRequest =
-      await LeaveRequest.findById(id);
-
-    if (!leaveRequest) {
-      return res.status(404).json({
-        success: false,
-        message:
-          'Leave request not found.'
-      });
-    }
-
-    const isOwner =
-      leaveRequest.user.toString() ===
-      req.user._id.toString();
-
-    const isAdminOrManager =
-      req.user.role === 'admin' ||
-      req.user.role === 'manager';
-
-    if (
-      !isAdminOrManager &&
-      !isOwner
-    ) {
-      return res.status(403).json({
-        success: false,
-        message:
-          'Access denied. You can only update your own leave requests.'
-      });
-    }
-
-    if (
-      leaveRequest.status !==
-      'Pending'
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: `Cannot update a leave request that is already ${leaveRequest.status.toLowerCase()}.`
-      });
-    }
-
-    const {
-      leaveType,
-      startDate,
-      endDate,
-      reason
-    } = req.body;
-
-    if (leaveType !== undefined) {
-      const normalizedLeaveType =
-        normalizeLeaveType(
-          leaveType
+      const leaveRequest =
+        await LeaveRequest.findById(
+          id
         );
 
-      if (!normalizedLeaveType) {
-        return res.status(400).json({
-          success: false,
-          message: `Invalid leave type. Allowed: ${VALID_LEAVE_TYPES.join(', ')}.`
-        });
+      if (!leaveRequest) {
+        return res
+          .status(404)
+          .json({
+            success: false,
+            message:
+              'Leave request not found.'
+          });
       }
 
-      leaveRequest.leaveType =
-        normalizedLeaveType;
-    }
+      const isOwner =
+        leaveRequest.user.toString() ===
+        req.user._id.toString();
 
-    let start =
-      leaveRequest.startDate;
-
-    let end =
-      leaveRequest.endDate;
-
-    if (startDate !== undefined) {
-      start = new Date(startDate);
+      const isAdminOrManager =
+        req.user.role ===
+          'admin' ||
+        req.user.role ===
+          'manager';
 
       if (
-        Number.isNaN(
-          start.getTime()
-        )
+        !isAdminOrManager &&
+        !isOwner
       ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            'Invalid start date.'
-        });
+        return res
+          .status(403)
+          .json({
+            success: false,
+            message:
+              'Access denied. You can only update your own leave requests.'
+          });
       }
-
-      leaveRequest.startDate =
-        start;
-    }
-
-    if (endDate !== undefined) {
-      end = new Date(endDate);
 
       if (
-        Number.isNaN(
-          end.getTime()
-        )
+        leaveRequest.status !==
+        'Pending'
       ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            'Invalid end date.'
-        });
+        return res
+          .status(400)
+          .json({
+            success: false,
+            message: `Cannot update a leave request that is already ${leaveRequest.status.toLowerCase()}.`
+          });
       }
 
-      leaveRequest.endDate =
-        end;
-    }
+      const {
+        leaveType,
+        startDate,
+        endDate,
+        reason
+      } = req.body;
 
-    if (
-      start &&
-      end &&
-      end < start
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          'End date cannot be before start date.'
-      });
-    }
-
-    if (reason !== undefined) {
       if (
-        !reason ||
-        !reason.trim()
+        leaveType !==
+        undefined
       ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            'Reason cannot be empty.'
-        });
+        const normalizedLeaveType =
+          normalizeLeaveType(
+            leaveType
+          );
+
+        if (
+          !normalizedLeaveType
+        ) {
+          return res
+            .status(400)
+            .json({
+              success: false,
+              message: `Invalid leave type. Allowed: ${VALID_LEAVE_TYPES.join(', ')}.`
+            });
+        }
+
+        leaveRequest.leaveType =
+          normalizedLeaveType;
       }
 
-      leaveRequest.reason =
-        reason.trim();
-    }
+      let start =
+        leaveRequest.startDate;
 
-    await leaveRequest.save();
+      let end =
+        leaveRequest.endDate;
 
-    const populated =
-      await LeaveRequest.findById(
-        leaveRequest._id
-      )
-        .populate(
-          'user',
-          'name email role avatar'
+      if (
+        startDate !==
+        undefined
+      ) {
+        start =
+          new Date(
+            startDate
+          );
+
+        if (
+          Number.isNaN(
+            start.getTime()
+          )
+        ) {
+          return res
+            .status(400)
+            .json({
+              success: false,
+              message:
+                'Invalid start date.'
+            });
+        }
+
+        leaveRequest.startDate =
+          start;
+      }
+
+      if (
+        endDate !==
+        undefined
+      ) {
+        end =
+          new Date(
+            endDate
+          );
+
+        if (
+          Number.isNaN(
+            end.getTime()
+          )
+        ) {
+          return res
+            .status(400)
+            .json({
+              success: false,
+              message:
+                'Invalid end date.'
+            });
+        }
+
+        leaveRequest.endDate =
+          end;
+      }
+
+      if (
+        start &&
+        end &&
+        end < start
+      ) {
+        return res
+          .status(400)
+          .json({
+            success: false,
+            message:
+              'End date cannot be before start date.'
+          });
+      }
+
+      if (
+        reason !==
+        undefined
+      ) {
+        if (
+          !reason ||
+          !reason.trim()
+        ) {
+          return res
+            .status(400)
+            .json({
+              success: false,
+              message:
+                'Reason cannot be empty.'
+            });
+        }
+
+        leaveRequest.reason =
+          reason.trim();
+      }
+
+      await leaveRequest.save();
+
+      const populated =
+        await LeaveRequest.findById(
+          leaveRequest._id
         )
-        .populate(
-          'reviewedBy',
-          'name email role'
-        )
-        .lean();
+          .populate(
+            'user',
+            'name email role avatar'
+          )
+          .populate(
+            'reviewedBy',
+            'name email role'
+          )
+          .lean();
 
-    const safe =
-      safeLeaveRequest(
-        populated
+      const safe =
+        safeLeaveRequest(
+          populated
+        );
+
+      return res
+        .status(200)
+        .json({
+          success: true,
+          message:
+            'Leave request updated successfully.',
+          leaveRequest:
+            safe,
+          request:
+            safe,
+          data:
+            safe
+        });
+    } catch (error) {
+      console.error(
+        'updateLeaveRequest error:',
+        error
       );
 
-    return res.status(200).json({
-      success: true,
-      message:
-        'Leave request updated successfully.',
-      leaveRequest: safe,
-      request: safe,
-      data: safe
-    });
-  } catch (error) {
-    console.error(
-      'updateLeaveRequest error:',
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message:
-        'Server error updating leave request.'
-    });
-  }
-};
+      return res
+        .status(500)
+        .json({
+          success: false,
+          message:
+            'Server error updating leave request.'
+        });
+    }
+  };
 
 /*
 |--------------------------------------------------------------------------
@@ -871,96 +1192,121 @@ const updateLeaveRequest = async (
 |--------------------------------------------------------------------------
 */
 
-const cancelLeaveRequest = async (
-  req,
-  res
-) => {
-  try {
-    const { id } = req.params;
+const cancelLeaveRequest =
+  async (
+    req,
+    res
+  ) => {
+    try {
+      const { id } =
+        req.params;
 
-    if (!isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message:
-          'Invalid leave request ID.'
-      });
-    }
+      if (
+        !isValidObjectId(id)
+      ) {
+        return res
+          .status(400)
+          .json({
+            success: false,
+            message:
+              'Invalid leave request ID.'
+          });
+      }
 
-    const leaveRequest =
-      await LeaveRequest.findById(id);
+      const leaveRequest =
+        await LeaveRequest.findById(
+          id
+        );
 
-    if (!leaveRequest) {
-      return res.status(404).json({
-        success: false,
-        message:
-          'Leave request not found.'
-      });
-    }
+      if (!leaveRequest) {
+        return res
+          .status(404)
+          .json({
+            success: false,
+            message:
+              'Leave request not found.'
+          });
+      }
 
-    if (
-      req.user.role === 'user' &&
-      leaveRequest.user.toString() !==
-        req.user._id.toString()
-    ) {
-      return res.status(403).json({
-        success: false,
-        message:
-          'Access denied. You can only cancel your own leave requests.'
-      });
-    }
+      if (
+        req.user.role ===
+          'user' &&
+        leaveRequest.user.toString() !==
+          req.user._id.toString()
+      ) {
+        return res
+          .status(403)
+          .json({
+            success: false,
+            message:
+              'Access denied. You can only cancel your own leave requests.'
+          });
+      }
 
-    if (
-      leaveRequest.status !==
-      'Pending'
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: `Cannot cancel a leave request that is already ${leaveRequest.status.toLowerCase()}.`
-      });
-    }
+      if (
+        leaveRequest.status !==
+        'Pending'
+      ) {
+        return res
+          .status(400)
+          .json({
+            success: false,
+            message: `Cannot cancel a leave request that is already ${leaveRequest.status.toLowerCase()}.`
+          });
+      }
 
-    leaveRequest.status =
-      'Cancelled';
+      leaveRequest.status =
+        'Cancelled';
 
-    await leaveRequest.save();
+      await leaveRequest.save();
 
-    const populated =
-      await LeaveRequest.findById(
-        leaveRequest._id
-      )
-        .populate(
-          'user',
-          'name email role avatar'
+      const populated =
+        await LeaveRequest.findById(
+          leaveRequest._id
         )
-        .populate(
-          'reviewedBy',
-          'name email role'
-        )
-        .lean();
+          .populate(
+            'user',
+            'name email role avatar'
+          )
+          .populate(
+            'reviewedBy',
+            'name email role'
+          )
+          .lean();
 
-    const safeData = safeLeaveRequest(populated);
+      const safeData =
+        safeLeaveRequest(
+          populated
+        );
 
-    return res.status(200).json({
-      success: true,
-      message:
-        'Leave request cancelled successfully.',
-      leaveRequest: safeData,
-      request: safeData,
-      data: safeData
-    });
-  } catch (error) {
-    console.error(
-      'cancelLeaveRequest error:',
-      error
-    );
+      return res
+        .status(200)
+        .json({
+          success: true,
+          message:
+            'Leave request cancelled successfully.',
+          leaveRequest:
+            safeData,
+          request:
+            safeData,
+          data:
+            safeData
+        });
+    } catch (error) {
+      console.error(
+        'cancelLeaveRequest error:',
+        error
+      );
 
-    return res.status(500).json({
-      success: false,
-      message:
-        'Server error cancelling leave request.'
-    });
-  }
-};
+      return res
+        .status(500)
+        .json({
+          success: false,
+          message:
+            'Server error cancelling leave request.'
+        });
+    }
+  };
 
 /*
 |--------------------------------------------------------------------------
@@ -968,141 +1314,168 @@ const cancelLeaveRequest = async (
 |--------------------------------------------------------------------------
 */
 
-const approveLeaveRequest = async (
-  req,
-  res
-) => {
-  try {
-    const { id } = req.params;
-
-    if (!isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message:
-          'Invalid leave request ID.'
-      });
-    }
-
-    const {
-      reviewComment,
-      comment,
-      reason
-    } = req.body;
-
-    const feedback =
-      reviewComment ||
-      comment ||
-      reason ||
-      '';
-
-    const leaveRequest =
-      await LeaveRequest.findById(id);
-
-    if (!leaveRequest) {
-      return res.status(404).json({
-        success: false,
-        message:
-          'Leave request not found.'
-      });
-    }
-
-    if (
-      leaveRequest.status !==
-      'Pending'
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: `Cannot approve a leave request that is already ${leaveRequest.status.toLowerCase()}.`
-      });
-    }
-
-    const now = new Date();
-
-    leaveRequest.status =
-      'Approved';
-
-    leaveRequest.reviewedBy =
-      req.user._id;
-
-    leaveRequest.reviewedAt =
-      now;
-
-    leaveRequest.reviewComment =
-      feedback
-        ? feedback.trim()
-        : '';
-
-    await leaveRequest.save();
-
-    const populated =
-      await LeaveRequest.findById(
-        leaveRequest._id
-      )
-        .populate(
-          'user',
-          'name email role avatar'
-        )
-        .populate(
-          'reviewedBy',
-          'name email role'
-        )
-        .lean();
-
+const approveLeaveRequest =
+  async (
+    req,
+    res
+  ) => {
     try {
-      const notifMessage =
+      const { id } =
+        req.params;
+
+      if (
+        !isValidObjectId(id)
+      ) {
+        return res
+          .status(400)
+          .json({
+            success: false,
+            message:
+              'Invalid leave request ID.'
+          });
+      }
+
+      const {
+        reviewComment,
+        comment,
+        reason
+      } = req.body;
+
+      const feedback =
+        reviewComment ||
+        comment ||
+        reason ||
+        '';
+
+      const leaveRequest =
+        await LeaveRequest.findById(
+          id
+        );
+
+      if (!leaveRequest) {
+        return res
+          .status(404)
+          .json({
+            success: false,
+            message:
+              'Leave request not found.'
+          });
+      }
+
+      if (
+        leaveRequest.status !==
+        'Pending'
+      ) {
+        return res
+          .status(400)
+          .json({
+            success: false,
+            message: `Cannot approve a leave request that is already ${leaveRequest.status.toLowerCase()}.`
+          });
+      }
+
+      const now =
+        new Date();
+
+      leaveRequest.status =
+        'Approved';
+
+      leaveRequest.reviewedBy =
+        req.user._id;
+
+      leaveRequest.reviewedAt =
+        now;
+
+      leaveRequest.reviewComment =
         feedback
-          ? `Your ${leaveRequest.leaveType} leave request has been approved. Note: ${feedback.trim()}`
-          : `Your ${leaveRequest.leaveType} leave request has been approved.`;
+          ? feedback.trim()
+          : '';
 
-      await createNotification({
-        userId: leaveRequest.user,
-        type: 'leave',
-        title:
-          'Leave Request Approved',
-        message: notifMessage,
-        relatedId:
-          leaveRequest._id,
-        relatedType:
-          'LeaveRequest',
-        actionUrl:
-          '/dashboard/leave-requests',
-        metadata: {
-          leaveType:
-            leaveRequest.leaveType,
-          reviewComment:
-            leaveRequest.reviewComment
-        }
-      });
-    } catch (notificationError) {
-      console.error(
-        'Notification creation error:',
+      await leaveRequest.save();
+
+      const populated =
+        await LeaveRequest.findById(
+          leaveRequest._id
+        )
+          .populate(
+            'user',
+            'name email role avatar'
+          )
+          .populate(
+            'reviewedBy',
+            'name email role'
+          )
+          .lean();
+
+      try {
+        const notifMessage =
+          feedback
+            ? `Your ${leaveRequest.leaveType} leave request has been approved. Note: ${feedback.trim()}`
+            : `Your ${leaveRequest.leaveType} leave request has been approved.`;
+
+        await createNotification({
+          userId:
+            leaveRequest.user,
+          type: 'leave',
+          title:
+            'Leave Request Approved',
+          message:
+            notifMessage,
+          relatedId:
+            leaveRequest._id,
+          relatedType:
+            'LeaveRequest',
+          actionUrl:
+            '/dashboard/leave-requests',
+          metadata: {
+            leaveType:
+              leaveRequest.leaveType,
+            reviewComment:
+              leaveRequest.reviewComment
+          }
+        });
+      } catch (
         notificationError
+      ) {
+        console.error(
+          'Notification creation error:',
+          notificationError
+        );
+      }
+
+      const safeData =
+        safeLeaveRequest(
+          populated
+        );
+
+      return res
+        .status(200)
+        .json({
+          success: true,
+          message:
+            'Leave request approved successfully.',
+          leaveRequest:
+            safeData,
+          request:
+            safeData,
+          data:
+            safeData
+        });
+    } catch (error) {
+      console.error(
+        'approveLeaveRequest error:',
+        error
       );
+
+      return res
+        .status(500)
+        .json({
+          success: false,
+          message:
+            'Server error approving leave request.'
+        });
     }
-
-    const safeData = safeLeaveRequest(populated);
-
-    return res.status(200).json({
-      success: true,
-      message:
-        'Leave request approved successfully.',
-      leaveRequest: safeData,
-      request: safeData,
-      data: safeData
-    });
-  } catch (error) {
-    console.error(
-      'approveLeaveRequest error:',
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message:
-        'Server error approving leave request.'
-    });
-  }
-};
+  };
 
 /*
 |--------------------------------------------------------------------------
@@ -1110,148 +1483,175 @@ const approveLeaveRequest = async (
 |--------------------------------------------------------------------------
 */
 
-const rejectLeaveRequest = async (
-  req,
-  res
-) => {
-  try {
-    const { id } = req.params;
-
-    if (!isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message:
-          'Invalid leave request ID.'
-      });
-    }
-
-    const {
-      reviewComment,
-      comment,
-      reason,
-      rejectionReason
-    } = req.body;
-
-    const feedback =
-      reviewComment ||
-      comment ||
-      reason ||
-      rejectionReason ||
-      '';
-
-    const leaveRequest =
-      await LeaveRequest.findById(id);
-
-    if (!leaveRequest) {
-      return res.status(404).json({
-        success: false,
-        message:
-          'Leave request not found.'
-      });
-    }
-
-    if (
-      leaveRequest.status !==
-      'Pending'
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: `Cannot reject a leave request that is already ${leaveRequest.status.toLowerCase()}.`
-      });
-    }
-
-    const now = new Date();
-
-    leaveRequest.status =
-      'Rejected';
-
-    leaveRequest.reviewedBy =
-      req.user._id;
-
-    leaveRequest.reviewedAt =
-      now;
-
-    leaveRequest.reviewComment =
-      feedback
-        ? feedback.trim()
-        : '';
-
-    leaveRequest.rejectionReason =
-      feedback
-        ? feedback.trim()
-        : '';
-
-    await leaveRequest.save();
-
-    const populated =
-      await LeaveRequest.findById(
-        leaveRequest._id
-      )
-        .populate(
-          'user',
-          'name email role avatar'
-        )
-        .populate(
-          'reviewedBy',
-          'name email role'
-        )
-        .lean();
-
+const rejectLeaveRequest =
+  async (
+    req,
+    res
+  ) => {
     try {
-      const notifMessage =
+      const { id } =
+        req.params;
+
+      if (
+        !isValidObjectId(id)
+      ) {
+        return res
+          .status(400)
+          .json({
+            success: false,
+            message:
+              'Invalid leave request ID.'
+          });
+      }
+
+      const {
+        reviewComment,
+        comment,
+        reason,
+        rejectionReason
+      } = req.body;
+
+      const feedback =
+        reviewComment ||
+        comment ||
+        reason ||
+        rejectionReason ||
+        '';
+
+      const leaveRequest =
+        await LeaveRequest.findById(
+          id
+        );
+
+      if (!leaveRequest) {
+        return res
+          .status(404)
+          .json({
+            success: false,
+            message:
+              'Leave request not found.'
+          });
+      }
+
+      if (
+        leaveRequest.status !==
+        'Pending'
+      ) {
+        return res
+          .status(400)
+          .json({
+            success: false,
+            message: `Cannot reject a leave request that is already ${leaveRequest.status.toLowerCase()}.`
+          });
+      }
+
+      const now =
+        new Date();
+
+      leaveRequest.status =
+        'Rejected';
+
+      leaveRequest.reviewedBy =
+        req.user._id;
+
+      leaveRequest.reviewedAt =
+        now;
+
+      leaveRequest.reviewComment =
         feedback
-          ? `Your ${leaveRequest.leaveType} leave request has been rejected. Reason: ${feedback.trim()}`
-          : `Your ${leaveRequest.leaveType} leave request has been rejected.`;
+          ? feedback.trim()
+          : '';
 
-      await createNotification({
-        userId: leaveRequest.user,
-        type: 'leave',
-        title:
-          'Leave Request Rejected',
-        message: notifMessage,
-        relatedId:
-          leaveRequest._id,
-        relatedType:
-          'LeaveRequest',
-        actionUrl:
-          '/dashboard/leave-requests',
-        metadata: {
-          leaveType:
-            leaveRequest.leaveType,
-          reviewComment:
-            leaveRequest.reviewComment
-        }
-      });
-    } catch (notificationError) {
-      console.error(
-        'Notification creation error:',
+      leaveRequest.rejectionReason =
+        feedback
+          ? feedback.trim()
+          : '';
+
+      await leaveRequest.save();
+
+      const populated =
+        await LeaveRequest.findById(
+          leaveRequest._id
+        )
+          .populate(
+            'user',
+            'name email role avatar'
+          )
+          .populate(
+            'reviewedBy',
+            'name email role'
+          )
+          .lean();
+
+      try {
+        const notifMessage =
+          feedback
+            ? `Your ${leaveRequest.leaveType} leave request has been rejected. Reason: ${feedback.trim()}`
+            : `Your ${leaveRequest.leaveType} leave request has been rejected.`;
+
+        await createNotification({
+          userId:
+            leaveRequest.user,
+          type: 'leave',
+          title:
+            'Leave Request Rejected',
+          message:
+            notifMessage,
+          relatedId:
+            leaveRequest._id,
+          relatedType:
+            'LeaveRequest',
+          actionUrl:
+            '/dashboard/leave-requests',
+          metadata: {
+            leaveType:
+              leaveRequest.leaveType,
+            reviewComment:
+              leaveRequest.reviewComment
+          }
+        });
+      } catch (
         notificationError
+      ) {
+        console.error(
+          'Notification creation error:',
+          notificationError
+        );
+      }
+
+      const safeData =
+        safeLeaveRequest(
+          populated
+        );
+
+      return res
+        .status(200)
+        .json({
+          success: true,
+          message:
+            'Leave request rejected successfully.',
+          leaveRequest:
+            safeData,
+          request:
+            safeData,
+          data:
+            safeData
+        });
+    } catch (error) {
+      console.error(
+        'rejectLeaveRequest error:',
+        error
       );
+
+      return res
+        .status(500)
+        .json({
+          success: false,
+          message:
+            'Server error rejecting leave request.'
+        });
     }
-
-    const safeData = safeLeaveRequest(populated);
-
-    return res.status(200).json({
-      success: true,
-      message:
-        'Leave request rejected successfully.',
-      leaveRequest: safeData,
-      request: safeData,
-      data: safeData
-    });
-  } catch (error) {
-    console.error(
-      'rejectLeaveRequest error:',
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message:
-        'Server error rejecting leave request.'
-    });
-  }
-};
+  };
 
 /*
 |--------------------------------------------------------------------------
@@ -1259,66 +1659,85 @@ const rejectLeaveRequest = async (
 |--------------------------------------------------------------------------
 */
 
-const deleteLeaveRequest = async (
-  req,
-  res
-) => {
-  try {
-    const { id } = req.params;
+const deleteLeaveRequest =
+  async (
+    req,
+    res
+  ) => {
+    try {
+      const { id } =
+        req.params;
 
-    if (!isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message:
-          'Invalid leave request ID.'
-      });
+      if (
+        !isValidObjectId(id)
+      ) {
+        return res
+          .status(400)
+          .json({
+            success: false,
+            message:
+              'Invalid leave request ID.'
+          });
+      }
+
+      const leaveRequest =
+        await LeaveRequest.findById(
+          id
+        )
+          .select('user')
+          .lean();
+
+      if (!leaveRequest) {
+        return res
+          .status(404)
+          .json({
+            success: false,
+            message:
+              'Leave request not found.'
+          });
+      }
+
+      if (
+        req.user.role ===
+          'user' &&
+        leaveRequest.user.toString() !==
+          req.user._id.toString()
+      ) {
+        return res
+          .status(403)
+          .json({
+            success: false,
+            message:
+              'Access denied. You can only delete your own leave requests.'
+          });
+      }
+
+      await LeaveRequest.findByIdAndDelete(
+        id
+      );
+
+      return res
+        .status(200)
+        .json({
+          success: true,
+          message:
+            'Leave request deleted successfully.'
+        });
+    } catch (error) {
+      console.error(
+        'deleteLeaveRequest error:',
+        error
+      );
+
+      return res
+        .status(500)
+        .json({
+          success: false,
+          message:
+            'Server error deleting leave request.'
+        });
     }
-
-    const leaveRequest =
-      await LeaveRequest.findById(id).select('user').lean();
-
-    if (!leaveRequest) {
-      return res.status(404).json({
-        success: false,
-        message:
-          'Leave request not found.'
-      });
-    }
-
-    if (
-      req.user.role === 'user' &&
-      leaveRequest.user.toString() !==
-        req.user._id.toString()
-    ) {
-      return res.status(403).json({
-        success: false,
-        message:
-          'Access denied. You can only delete your own leave requests.'
-      });
-    }
-
-    await LeaveRequest.findByIdAndDelete(
-      id
-    );
-
-    return res.status(200).json({
-      success: true,
-      message:
-        'Leave request deleted successfully.'
-    });
-  } catch (error) {
-    console.error(
-      'deleteLeaveRequest error:',
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message:
-        'Server error deleting leave request.'
-    });
-  }
-};
+  };
 
 /*
 |--------------------------------------------------------------------------

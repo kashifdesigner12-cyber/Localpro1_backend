@@ -1165,6 +1165,388 @@ const sendAttendanceReminderEmail = async (
 };
 
 // =====================================================
+// 6. LEAVE REQUEST EMAIL TO ADMIN
+// =====================================================
+
+const sendLeaveRequestEmailToAdmin = async (
+  adminEmail,
+  userName,
+  userEmail,
+  leaveType,
+  startDate,
+  endDate,
+  reason
+) => {
+  try {
+    const leaveRequestsUrl =
+      "http://localpro1.net/admin/leave-requests";
+
+    const mailOptions = {
+      from: `"LocalPro Portal" <${process.env.EMAIL_USER}>`,
+      to: adminEmail,
+      subject: `New Leave Request - ${userName || "User"}`,
+
+      html: `
+        <!DOCTYPE html>
+        <html lang="en">
+
+        <head>
+          <meta charset="UTF-8">
+
+          <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1.0"
+          >
+
+          <title>New Leave Request</title>
+        </head>
+
+        <body
+          style="
+            margin: 0;
+            padding: 0;
+            background-color: #f4f7fa;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI',
+              Roboto, Helvetica, Arial, sans-serif;
+          "
+        >
+
+          <table
+            border="0"
+            cellpadding="0"
+            cellspacing="0"
+            width="100%"
+            style="padding: 40px 0;"
+          >
+
+            <tr>
+
+              <td align="center">
+
+                <table
+                  border="0"
+                  cellpadding="0"
+                  cellspacing="0"
+                  width="100%"
+                  style="
+                    max-width: 600px;
+                    background-color: #ffffff;
+                    border-radius: 12px;
+                    overflow: hidden;
+                    border: 1px solid #e2e8f0;
+                  "
+                >
+
+                  <!-- HEADER -->
+
+                  <tr>
+
+                    <td
+                      style="
+                        background: linear-gradient(
+                          135deg,
+                          #1e293b 0%,
+                          #0f172a 100%
+                        );
+                        padding: 32px 40px;
+                        text-align: center;
+                      "
+                    >
+
+                      <h1
+                        style="
+                          color: #ffffff;
+                          margin: 0;
+                          font-size: 24px;
+                        "
+                      >
+                        LocalPro Portal
+                      </h1>
+
+                      <p
+                        style="
+                          color: #94a3b8;
+                          margin: 8px 0 0 0;
+                          font-size: 14px;
+                        "
+                      >
+                        New Leave Request
+                      </p>
+
+                    </td>
+
+                  </tr>
+
+                  <!-- CONTENT -->
+
+                  <tr>
+
+                    <td
+                      style="
+                        padding: 36px 40px 30px 40px;
+                      "
+                    >
+
+                      <h2
+                        style="
+                          color: #0f172a;
+                          margin: 0 0 16px 0;
+                          font-size: 20px;
+                        "
+                      >
+                        New Leave Request Submitted
+                      </h2>
+
+                      <p
+                        style="
+                          color: #475569;
+                          font-size: 15px;
+                          line-height: 1.6;
+                          margin: 0 0 24px 0;
+                        "
+                      >
+                        ${userName || "A user"} has submitted a new
+                        leave request. Please review the details below.
+                      </p>
+
+                      <!-- LEAVE DETAILS -->
+
+                      <table
+                        border="0"
+                        cellpadding="0"
+                        cellspacing="0"
+                        width="100%"
+                        style="
+                          background-color: #f8fafc;
+                          border: 1px solid #e2e8f0;
+                          border-radius: 8px;
+                          margin-bottom: 28px;
+                        "
+                      >
+
+                        <tr>
+                          <td
+                            style="
+                              padding: 12px 16px;
+                              color: #64748b;
+                              font-size: 14px;
+                              font-weight: 600;
+                              width: 35%;
+                            "
+                          >
+                            User
+                          </td>
+
+                          <td
+                            style="
+                              padding: 12px 16px;
+                              color: #0f172a;
+                              font-size: 14px;
+                            "
+                          >
+                            ${userName || "N/A"}
+                          </td>
+                        </tr>
+
+                        <tr>
+                          <td
+                            style="
+                              padding: 12px 16px;
+                              color: #64748b;
+                              font-size: 14px;
+                              font-weight: 600;
+                            "
+                          >
+                            Email
+                          </td>
+
+                          <td
+                            style="
+                              padding: 12px 16px;
+                              color: #0f172a;
+                              font-size: 14px;
+                            "
+                          >
+                            ${userEmail || "N/A"}
+                          </td>
+                        </tr>
+
+                        <tr>
+                          <td
+                            style="
+                              padding: 12px 16px;
+                              color: #64748b;
+                              font-size: 14px;
+                              font-weight: 600;
+                            "
+                          >
+                            Leave Type
+                          </td>
+
+                          <td
+                            style="
+                              padding: 12px 16px;
+                              color: #0f172a;
+                              font-size: 14px;
+                            "
+                          >
+                            ${leaveType || "N/A"}
+                          </td>
+                        </tr>
+
+                        <tr>
+                          <td
+                            style="
+                              padding: 12px 16px;
+                              color: #64748b;
+                              font-size: 14px;
+                              font-weight: 600;
+                            "
+                          >
+                            Start Date
+                          </td>
+
+                          <td
+                            style="
+                              padding: 12px 16px;
+                              color: #0f172a;
+                              font-size: 14px;
+                            "
+                          >
+                            ${startDate || "N/A"}
+                          </td>
+                        </tr>
+
+                        <tr>
+                          <td
+                            style="
+                              padding: 12px 16px;
+                              color: #64748b;
+                              font-size: 14px;
+                              font-weight: 600;
+                            "
+                          >
+                            End Date
+                          </td>
+
+                          <td
+                            style="
+                              padding: 12px 16px;
+                              color: #0f172a;
+                              font-size: 14px;
+                            "
+                          >
+                            ${endDate || "N/A"}
+                          </td>
+                        </tr>
+
+                        <tr>
+                          <td
+                            style="
+                              padding: 12px 16px;
+                              color: #64748b;
+                              font-size: 14px;
+                              font-weight: 600;
+                              vertical-align: top;
+                            "
+                          >
+                            Reason
+                          </td>
+
+                          <td
+                            style="
+                              padding: 12px 16px;
+                              color: #0f172a;
+                              font-size: 14px;
+                              line-height: 1.5;
+                            "
+                          >
+                            ${reason || "N/A"}
+                          </td>
+                        </tr>
+
+                      </table>
+
+                      <!-- BUTTON -->
+
+                      <div
+                        style="
+                          text-align: center;
+                          margin-bottom: 28px;
+                        "
+                      >
+
+                        <a
+                          href="${leaveRequestsUrl}"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style="
+                            background-color: #2563eb;
+                            color: #ffffff;
+                            padding: 14px 32px;
+                            font-size: 15px;
+                            font-weight: 600;
+                            text-decoration: none;
+                            border-radius: 8px;
+                            display: inline-block;
+                          "
+                        >
+                          View Leave Requests
+                        </a>
+
+                      </div>
+
+                      <p
+                        style="
+                          color: #64748b;
+                          font-size: 13px;
+                          line-height: 1.5;
+                          margin: 0;
+                          text-align: center;
+                        "
+                      >
+                        Please review the request and approve or
+                        reject it from the Leave Requests page.
+                      </p>
+
+                    </td>
+
+                  </tr>
+
+                </table>
+
+              </td>
+
+            </tr>
+
+          </table>
+
+        </body>
+
+        </html>
+      `,
+    };
+
+    const info =
+      await transporter.sendMail(mailOptions);
+
+    console.log(
+      "✅ Leave request email sent to admin:",
+      adminEmail
+    );
+
+    return info;
+  } catch (err) {
+    console.error(
+      "❌ SendLeaveRequestEmailToAdmin failed:",
+      err
+    );
+
+    throw err;
+  }
+};
+
+// =====================================================
 // EXPORTS
 // =====================================================
 
@@ -1174,4 +1556,5 @@ module.exports = {
   sendTaskAssignedEmail,
   sendTaskCompletedEmail,
   sendAttendanceReminderEmail,
+  sendLeaveRequestEmailToAdmin,
 };

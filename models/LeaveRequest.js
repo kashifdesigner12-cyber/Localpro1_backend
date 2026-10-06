@@ -1,53 +1,53 @@
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
 const LeaveRequestSchema = new mongoose.Schema(
   {
     user: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
-      required: [true, 'User is required'],
+      ref: "User",
+      required: [true, "User is required"],
     },
 
     leaveType: {
       type: String,
       enum: [
-        'Annual',
-        'Sick',
-        'Casual',
-        'Emergency',
-        'Maternity',
-        'Paternity',
-        'Unpaid',
-        'Other',
+        "Annual",
+        "Sick",
+        "Casual",
+        "Emergency",
+        "Maternity",
+        "Paternity",
+        "Unpaid",
+        "Other",
       ],
-      required: [true, 'Leave type is required'],
+      required: [true, "Leave type is required"],
     },
 
     startDate: {
       type: Date,
-      required: [true, 'Start date is required'],
+      required: [true, "Start date is required"],
     },
 
     endDate: {
       type: Date,
-      required: [true, 'End date is required'],
+      required: [true, "End date is required"],
     },
 
     reason: {
       type: String,
-      required: [true, 'Reason is required'],
+      required: [true, "Reason is required"],
       trim: true,
     },
 
     status: {
       type: String,
-      enum: ['Pending', 'Approved', 'Rejected', 'Cancelled'],
-      default: 'Pending',
+      enum: ["Pending", "Approved", "Rejected", "Cancelled"],
+      default: "Pending",
     },
 
     reviewedBy: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
+      ref: "User",
       default: null,
     },
 
@@ -59,13 +59,27 @@ const LeaveRequestSchema = new mongoose.Schema(
     reviewComment: {
       type: String,
       trim: true,
-      default: '',
+      default: "",
     },
 
     rejectionReason: {
       type: String,
       trim: true,
-      default: '',
+      default: "",
+    },
+
+    // =====================================================
+    // ADMIN EMAIL NOTIFICATION
+    // =====================================================
+
+    adminEmailNotificationSent: {
+      type: Boolean,
+      default: false,
+    },
+
+    adminEmailNotificationSentAt: {
+      type: Date,
+      default: null,
     },
   },
   {
@@ -99,4 +113,15 @@ LeaveRequestSchema.index({
   endDate: 1,
 });
 
-module.exports = mongoose.model('LeaveRequest', LeaveRequestSchema);
+// Pending requests
+LeaveRequestSchema.index({
+  status: 1,
+  createdAt: -1,
+});
+
+// Admin email notification tracking
+LeaveRequestSchema.index({
+  adminEmailNotificationSent: 1,
+});
+
+module.exports = mongoose.model("LeaveRequest", LeaveRequestSchema);
