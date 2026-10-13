@@ -1,3 +1,4 @@
+
 "use strict";
 
 // =====================================================
@@ -7,6 +8,7 @@
 require("dotenv").config();
 
 const dns = require("dns");
+
 dns.setServers(["1.1.1.1", "8.8.8.8"]);
 
 // =====================================================
@@ -95,7 +97,7 @@ const corsOptions = {
 };
 
 // =====================================================
-// SOCKET.IO (WHATSAPP SPEED OPTIMIZED)
+// SOCKET.IO - REAL-TIME FOUNDATION
 // =====================================================
 
 const io = new Server(server, {
@@ -106,83 +108,174 @@ const io = new Server(server, {
   },
   transports: ["websocket", "polling"],
   pingInterval: 10000,
-  pingTimeout: 5000,
-  connectTimeout: 10000,
+  pingTimeout: 20000,
+  connectTimeout: 20000,
   maxHttpBufferSize: 5e6,
 });
 
 app.set("io", io);
 
+// Map: userId -> Set of connected socket IDs.
+// Supports multiple browser tabs and devices.
 const activeUsers = new Map();
+
+function addActiveSocket(userId, socketId) {
+  const id = String(userId);
+
+  if (!activeUsers.has(id)) {
+    activeUsers.set(id, new Set());
+  }
+
+  activeUsers.get(id).add(socketId);
+}
+
+function removeActiveSocket(userId, socketId) {
+  const id = String(userId);
+  const sockets = activeUsers.get(id);
+
+  if (!sockets) return;
+
+  sockets.delete(socketId);
+
+  // Mark offline only when the last socket disconnects.
+  if (sockets.size === 0) {
+    activeUsers.delete(id);
+
+    io.emit("update_user_status", {
+      userId: id,
+      status: "offline",
+    });
+  }
+}
+
+// Make Socket.IO and active connection tracking available
+// to controllers through Express.
+app.set("activeUsers", activeUsers);
 
 io.on("connection", (socket) => {
   console.log(`[Socket.IO] Connected: ${socket.id}`);
 
-  // Auto-extract user from handshake auth token for instant room joining
+  let connectedUserId = null;
+
+  // Try authenticating the socket with the existing JWT.
+  // Frontend can provide auth: { token: "..." }.
   try {
-    const token = socket.handshake.auth?.token || socket.handshake.headers?.authorization?.split(" ")[1];
+    const authorization =
+      socket.handshake.headers?.authorization || "";
+
+    const token =
+      socket.handshake.auth?.token ||
+      authorization.replace(/^Bearer\s+/i, "");
+
     if (token && process.env.JWT_SECRET) {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      const userId = decoded?.id || decoded?._id || decoded?.userId;
+
+      const userId =
+        decoded?.id ||
+        decoded?._id ||
+        decoded?.userId;
+
       if (userId) {
-        const id = String(userId);
-        activeUsers.set(id, socket.id);
-        socket.join(id);
-        console.log(`[Socket.IO] Auto-joined user room via token: ${id}`);
+        connectedUserId = String(userId);
+        socket.data.userId = connectedUserId;
+
+        socket.join(connectedUserId);
+        addActiveSocket(connectedUserId, socket.id);
+
+        io.emit("update_user_status", {
+          userId: connectedUserId,
+          status: "online",
+        });
+
+        console.log(
+          `[Socket.IO] Auto-joined user room: ${connectedUserId}`
+        );
       }
     }
-  } catch (err) {
-    // Fallback to explicit user_join event if token verify fails
+  } catch (error) {
+    console.warn(
+      "[Socket.IO] Token verification failed; awaiting user_join."
+    );
   }
 
+  // Compatibility with the existing frontend.
   socket.on("user_join", (userId) => {
-    if (userId) {
-      const id = String(userId);
-      activeUsers.set(id, socket.id);
-      socket.join(id);
+    if (!userId) return;
 
-      io.emit("update_user_status", {
-        userId: id,
-        status: "online",
-      });
+    const requestedId = String(userId);
 
-      console.log(`[Socket.IO] User online & joined room: ${id}`);
+    // An authenticated socket cannot change its identity.
+    if (
+      connectedUserId &&
+      requestedId !== connectedUserId
+    ) {
+      console.warn(
+        `[Socket.IO] Rejected mismatched user_join: ${socket.id}`
+      );
+      return;
     }
+
+    // Legacy compatibility: existing clients may send user_join
+    // without providing a JWT in the handshake.
+    // Replace this fallback with mandatory authentication
+    // after the frontend is updated.
+    if (!connectedUserId) {
+      connectedUserId = requestedId;
+      socket.data.userId = requestedId;
+      addActiveSocket(requestedId, socket.id);
+    }
+
+    socket.join(connectedUserId);
+
+    io.emit("update_user_status", {
+      userId: connectedUserId,
+      status: "online",
+    });
+
+    console.log(
+      `[Socket.IO] User online & joined room: ${connectedUserId}`
+    );
   });
 
+  // Keep the existing join_room event for compatibility.
+  // IMPORTANT: authorize conversation membership before allowing
+  // arbitrary room joins in a production messaging system.
   socket.on("join_room", (roomId) => {
-    if (roomId) {
-      socket.join(roomId);
-      console.log(
-        `[Socket.IO] Socket ${socket.id} joined room: ${roomId}`
-      );
-    }
+    if (!roomId) return;
+
+    socket.join(String(roomId));
+
+    console.log(
+      `[Socket.IO] Socket ${socket.id} joined room: ${roomId}`
+    );
   });
 
   socket.on("leave_room", (roomId) => {
-    if (roomId) {
-      socket.leave(roomId);
+    if (!roomId) return;
+
+    // Do not leave the user's own private room.
+    if (
+      connectedUserId &&
+      String(roomId) === connectedUserId
+    ) {
+      return;
     }
+
+    socket.leave(String(roomId));
   });
 
   socket.on("disconnect", (reason) => {
-    for (const [userId, socketId] of activeUsers.entries()) {
-      if (socketId === socket.id) {
-        activeUsers.delete(userId);
+    if (connectedUserId) {
+      removeActiveSocket(connectedUserId, socket.id);
 
-        io.emit("update_user_status", {
-          userId,
-          status: "offline",
-        });
-
-        console.log(`[Socket.IO] User offline: ${userId}`);
-        break;
-      }
+      console.log(
+        `[Socket.IO] Disconnected user ${connectedUserId}: ${reason}`
+      );
+    } else {
+      console.log(
+        `[Socket.IO] Disconnected: ${socket.id} (${reason})`
+      );
     }
-
-    console.log(
-      `[Socket.IO] Disconnected: ${socket.id} (${reason})`
-    );
   });
 
   socket.on("error", (error) => {
@@ -227,6 +320,7 @@ const loadRouter = (routePath) => {
 // =====================================================
 
 const uploadsDir = path.join(__dirname, "uploads");
+
 fs.mkdirSync(uploadsDir, { recursive: true });
 
 // =====================================================
@@ -520,9 +614,11 @@ const startServer = async () => {
       serverStarted = true;
 
       console.log(`[Server] Running on port ${PORT}`);
+
       console.log(
         `[Environment] ${process.env.NODE_ENV || "development"}`
       );
+
       console.log(
         "[Socket.IO] Real-server initialized with speed optimizations."
       );
@@ -576,7 +672,10 @@ const shutdown = async (signal) => {
       await new Promise((resolve) => {
         server.close((error) => {
           if (error) {
-            console.error("[Server] HTTP close error:", error.message);
+            console.error(
+              "[Server] HTTP close error:",
+              error.message
+            );
           } else {
             console.log("[Server] HTTP server closed.");
           }

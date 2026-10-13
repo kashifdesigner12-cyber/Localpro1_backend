@@ -10,9 +10,15 @@ const isValidObjectId = (id) =>
 
 const safeUserRef = (u) => {
   if (!u) return null;
+
   if (typeof u === 'object' && u._id) {
     let cleanAvatar = u.avatar || null;
-    if (typeof cleanAvatar === 'string' && cleanAvatar.startsWith('data:image') && cleanAvatar.length > 1000) {
+
+    if (
+      typeof cleanAvatar === 'string' &&
+      cleanAvatar.startsWith('data:image') &&
+      cleanAvatar.length > 1000
+    ) {
       cleanAvatar = null;
     }
 
@@ -27,6 +33,7 @@ const safeUserRef = (u) => {
       avatar: cleanAvatar
     };
   }
+
   return u;
 };
 
@@ -34,9 +41,11 @@ const safeMessage = (msg, currentUserId = null) => {
   if (!msg) return null;
 
   const isDeletedForEveryone = Boolean(msg.isDeletedForEveryone);
+
   const deletedForList = Array.isArray(msg.deletedFor)
     ? msg.deletedFor.map((id) => id.toString())
     : [];
+
   const isDeletedForMe = currentUserId
     ? deletedForList.includes(currentUserId.toString())
     : false;
@@ -53,16 +62,18 @@ const safeMessage = (msg, currentUserId = null) => {
     recipient: safeUserRef(msg.recipient),
     body: displayBody,
     message: displayBody,
-    messageType: isDeletedForEveryone ? 'text' : msg.messageType || 'text',
+    messageType: isDeletedForEveryone
+      ? 'text'
+      : msg.messageType || 'text',
     attachments: isDeletedForEveryone
       ? []
       : Array.isArray(msg.attachments)
-      ? msg.attachments
-      : [],
+        ? msg.attachments
+        : [],
     isRead: Boolean(msg.isRead),
     readAt: msg.readAt || null,
-    isDeletedForEveryone: isDeletedForEveryone,
-    isDeletedForMe: isDeletedForMe,
+    isDeletedForEveryone,
+    isDeletedForMe,
     deletedForEveryoneAt: msg.deletedForEveryoneAt || null,
     deletedBy: safeUserRef(msg.deletedBy),
     createdAt: msg.createdAt,
@@ -74,43 +85,125 @@ const determineMessageType = (attachments, defaultType = 'text') => {
   if (!Array.isArray(attachments) || attachments.length === 0) {
     return defaultType;
   }
+
   const first = attachments[0];
-  const mime = String(first.mimeType || first.fileType || '').toLowerCase();
+  const mime = String(
+    first.mimeType || first.fileType || ''
+  ).toLowerCase();
+
   if (mime.startsWith('image/')) return 'image';
   if (mime.startsWith('video/')) return 'video';
   if (mime.startsWith('audio/')) return 'audio';
+
   return 'file';
 };
 
+// Send realtime events to a user's private room, excluding sockets
+// already inside the conversation room to avoid duplicate messages.
+const emitToUserOutsideConversation = (
+  io,
+  userId,
+  conversationId,
+  eventName,
+  payload
+) => {
+  if (!io || !userId || !eventName) return;
+
+  const userRoom = String(userId);
+  const conversationRoom = String(conversationId || '');
+
+  try {
+    const sockets = io.sockets && io.sockets.sockets;
+
+    if (sockets && typeof sockets.forEach === 'function') {
+      sockets.forEach((socket) => {
+        if (
+          socket &&
+          socket.rooms &&
+          socket.rooms.has(userRoom) &&
+          (!conversationRoom ||
+            !socket.rooms.has(conversationRoom))
+        ) {
+          socket.emit(eventName, payload);
+        }
+      });
+
+      return;
+    }
+
+    const operator = io.to(userRoom);
+
+    if (
+      conversationRoom &&
+      operator &&
+      typeof operator.except === 'function'
+    ) {
+      operator.except(conversationRoom).emit(eventName, payload);
+    } else if (operator) {
+      operator.emit(eventName, payload);
+    }
+  } catch (socketError) {
+    console.error(
+      `Socket event "${eventName}" failed:`,
+      socketError.message
+    );
+  }
+};
+
+// Get messages for a conversation.
 const getMessages = async (req, res) => {
   try {
     const { conversationId } = req.params;
     const { page = 1, limit = 50 } = req.query;
 
     if (!isValidObjectId(conversationId)) {
-      return res.status(400).json({ success: false, message: 'Invalid conversation ID.' });
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid conversation ID.'
+      });
     }
 
-    const conversation = await Conversation.findById(conversationId).select('participants userId').lean();
+    const conversation = await Conversation.findById(conversationId)
+      .select('participants userId')
+      .lean();
+
     if (!conversation) {
-      return res.status(404).json({ success: false, message: 'Conversation not found.' });
+      return res.status(404).json({
+        success: false,
+        message: 'Conversation not found.'
+      });
     }
 
     const userRole = String(req.user?.role || '').toLowerCase();
-    const isParticipant = Array.isArray(conversation.participants) &&
-      conversation.participants.some((p) => p.toString() === req.user._id.toString());
-    const isLegacyUser = conversation.userId &&
+
+    const isParticipant =
+      Array.isArray(conversation.participants) &&
+      conversation.participants.some(
+        (p) => p.toString() === req.user._id.toString()
+      );
+
+    const isLegacyUser =
+      conversation.userId &&
       conversation.userId.toString() === req.user._id.toString();
 
-    if (!isParticipant && !isLegacyUser && userRole !== 'admin' && userRole !== 'manager') {
+    if (
+      !isParticipant &&
+      !isLegacyUser &&
+      userRole !== 'admin' &&
+      userRole !== 'manager'
+    ) {
       return res.status(403).json({
         success: false,
-        message: 'Access denied. You are not a participant in this conversation.'
+        message:
+          'Access denied. You are not a participant in this conversation.'
       });
     }
 
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
+    const limitNum = Math.min(
+      100,
+      Math.max(1, parseInt(limit, 10) || 50)
+    );
     const skip = (pageNum - 1) * limitNum;
 
     const filter = {
@@ -127,10 +220,13 @@ const getMessages = async (req, res) => {
         .skip(skip)
         .limit(limitNum)
         .lean(),
+
       Message.countDocuments(filter)
     ]);
 
-    const formattedMessages = messages.map((m) => safeMessage(m, req.user._id));
+    const formattedMessages = messages.map((m) =>
+      safeMessage(m, req.user._id)
+    );
 
     return res.status(200).json({
       success: true,
@@ -145,16 +241,24 @@ const getMessages = async (req, res) => {
     });
   } catch (error) {
     console.error('getMessages error:', error);
-    return res.status(500).json({ success: false, message: 'Server error retrieving messages.' });
+
+    return res.status(500).json({
+      success: false,
+      message: 'Server error retrieving messages.'
+    });
   }
 };
 
+// Get a single message.
 const getMessageById = async (req, res) => {
   try {
     const { id } = req.params;
 
     if (!isValidObjectId(id)) {
-      return res.status(400).json({ success: false, message: 'Invalid message ID.' });
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid message ID.'
+      });
     }
 
     const message = await Message.findById(id)
@@ -164,24 +268,52 @@ const getMessageById = async (req, res) => {
       .lean();
 
     if (!message) {
-      return res.status(404).json({ success: false, message: 'Message not found.' });
+      return res.status(404).json({
+        success: false,
+        message: 'Message not found.'
+      });
     }
 
     if (
       Array.isArray(message.deletedFor) &&
-      message.deletedFor.some((uid) => uid.toString() === req.user._id.toString())
+      message.deletedFor.some(
+        (uid) => uid.toString() === req.user._id.toString()
+      )
     ) {
-      return res.status(404).json({ success: false, message: 'Message not found.' });
+      return res.status(404).json({
+        success: false,
+        message: 'Message not found.'
+      });
     }
 
     const userRole = String(req.user?.role || '').toLowerCase();
-    const isSender = message.sender && (message.sender._id ? message.sender._id.toString() : message.sender.toString()) === req.user._id.toString();
-    const isRecipient = message.recipient && (message.recipient._id ? message.recipient._id.toString() : message.recipient.toString()) === req.user._id.toString();
 
-    if (!isSender && !isRecipient && userRole !== 'admin' && userRole !== 'manager') {
+    const isSender =
+      message.sender &&
+      (
+        message.sender._id
+          ? message.sender._id.toString()
+          : message.sender.toString()
+      ) === req.user._id.toString();
+
+    const isRecipient =
+      message.recipient &&
+      (
+        message.recipient._id
+          ? message.recipient._id.toString()
+          : message.recipient.toString()
+      ) === req.user._id.toString();
+
+    if (
+      !isSender &&
+      !isRecipient &&
+      userRole !== 'admin' &&
+      userRole !== 'manager'
+    ) {
       return res.status(403).json({
         success: false,
-        message: 'Access denied. You do not have permission to view this message.'
+        message:
+          'Access denied. You do not have permission to view this message.'
       });
     }
 
@@ -194,13 +326,27 @@ const getMessageById = async (req, res) => {
     });
   } catch (error) {
     console.error('getMessageById error:', error);
-    return res.status(500).json({ success: false, message: 'Server error retrieving message.' });
+
+    return res.status(500).json({
+      success: false,
+      message: 'Server error retrieving message.'
+    });
   }
 };
 
+// Send a message and notify the recipient in real time.
 const sendMessage = async (req, res) => {
   try {
-    const { conversationId, recipientId, to, body, message, content, messageType } = req.body;
+    const {
+      conversationId,
+      recipientId,
+      to,
+      body,
+      message,
+      content,
+      messageType
+    } = req.body;
+
     let rawAttachments = req.body.attachments;
 
     if (typeof rawAttachments === 'string') {
@@ -211,19 +357,26 @@ const sendMessage = async (req, res) => {
       }
     }
 
-    let parsedAttachments = Array.isArray(rawAttachments) ? [...rawAttachments] : [];
+    let parsedAttachments = Array.isArray(rawAttachments)
+      ? [...rawAttachments]
+      : [];
 
     const incomingFiles = [];
+
     if (req.files) {
       if (Array.isArray(req.files)) {
         incomingFiles.push(...req.files);
       } else if (typeof req.files === 'object') {
         Object.values(req.files).forEach((fileArr) => {
-          if (Array.isArray(fileArr)) incomingFiles.push(...fileArr);
-          else if (fileArr) incomingFiles.push(fileArr);
+          if (Array.isArray(fileArr)) {
+            incomingFiles.push(...fileArr);
+          } else if (fileArr) {
+            incomingFiles.push(fileArr);
+          }
         });
       }
     }
+
     if (req.file) {
       incomingFiles.push(req.file);
     }
@@ -237,18 +390,25 @@ const sendMessage = async (req, res) => {
         mimeType: file.mimetype,
         size: file.size
       }));
-      parsedAttachments = [...parsedAttachments, ...uploadedList];
+
+      parsedAttachments = [
+        ...parsedAttachments,
+        ...uploadedList
+      ];
     }
 
     const uniqueAttachments = [];
     const seenUrls = new Set();
+
     for (const att of parsedAttachments) {
       const identifier = att.url || att.filename;
+
       if (identifier && !seenUrls.has(identifier)) {
         seenUrls.add(identifier);
         uniqueAttachments.push(att);
       }
     }
+
     parsedAttachments = uniqueAttachments;
 
     const text = body || message || content || '';
@@ -256,7 +416,8 @@ const sendMessage = async (req, res) => {
     if (!text.trim() && parsedAttachments.length === 0) {
       return res.status(400).json({
         success: false,
-        message: 'Message content or at least one file attachment is required.'
+        message:
+          'Message content or at least one file attachment is required.'
       });
     }
 
@@ -265,50 +426,92 @@ const sendMessage = async (req, res) => {
 
     if (conversationId) {
       if (!isValidObjectId(conversationId)) {
-        return res.status(400).json({ success: false, message: 'Invalid conversation ID.' });
-      }
-      conversation = await Conversation.findById(conversationId);
-      if (!conversation) {
-        return res.status(404).json({ success: false, message: 'Conversation not found.' });
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid conversation ID.'
+        });
       }
 
-      const isParticipant = Array.isArray(conversation.participants) &&
-        conversation.participants.some((p) => p.toString() === req.user._id.toString());
-      const isLegacyUser = conversation.userId &&
+      conversation = await Conversation.findById(conversationId);
+
+      if (!conversation) {
+        return res.status(404).json({
+          success: false,
+          message: 'Conversation not found.'
+        });
+      }
+
+      const isParticipant =
+        Array.isArray(conversation.participants) &&
+        conversation.participants.some(
+          (p) => p.toString() === req.user._id.toString()
+        );
+
+      const isLegacyUser =
+        conversation.userId &&
         conversation.userId.toString() === req.user._id.toString();
 
-      if (!isParticipant && !isLegacyUser && userRole !== 'admin' && userRole !== 'manager') {
+      if (
+        !isParticipant &&
+        !isLegacyUser &&
+        userRole !== 'admin' &&
+        userRole !== 'manager'
+      ) {
         return res.status(403).json({
           success: false,
-          message: 'Access denied. You are not a participant in this conversation.'
+          message:
+            'Access denied. You are not a participant in this conversation.'
         });
       }
     } else if (recipientId || to) {
       const targetUserId = recipientId || to;
+
       if (!isValidObjectId(targetUserId)) {
-        return res.status(400).json({ success: false, message: 'Invalid recipient ID.' });
-      }
-      if (targetUserId.toString() === req.user._id.toString()) {
-        return res.status(400).json({ success: false, message: 'Cannot send message to yourself.' });
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid recipient ID.'
+        });
       }
 
-      const targetUser = await User.findById(targetUserId).select('_id role').lean();
+      if (targetUserId.toString() === req.user._id.toString()) {
+        return res.status(400).json({
+          success: false,
+          message: 'Cannot send message to yourself.'
+        });
+      }
+
+      const targetUser = await User.findById(targetUserId)
+        .select('_id role')
+        .lean();
+
       if (!targetUser) {
-        return res.status(404).json({ success: false, message: 'Recipient user not found.' });
+        return res.status(404).json({
+          success: false,
+          message: 'Recipient user not found.'
+        });
       }
 
       if (userRole !== 'admin' && userRole !== 'manager') {
         const targetRole = String(targetUser.role || '').toLowerCase();
-        if (targetRole !== 'admin' && targetRole !== 'manager' && targetRole !== 'support') {
+
+        if (
+          targetRole !== 'admin' &&
+          targetRole !== 'manager' &&
+          targetRole !== 'support'
+        ) {
           return res.status(403).json({
             success: false,
-            message: 'Access denied. Regular users can only message Admin or Support.'
+            message:
+              'Access denied. Regular users can only message Admin or Support.'
           });
         }
       }
 
       conversation = await Conversation.findOne({
-        participants: { $all: [req.user._id, targetUserId],$size: 2 }
+        participants: {
+          $all: [req.user._id, targetUserId],
+          $size: 2
+        }
       });
 
       if (!conversation) {
@@ -326,14 +529,39 @@ const sendMessage = async (req, res) => {
     }
 
     let resolvedRecipientId = null;
+
     if (Array.isArray(conversation.participants)) {
       const other = conversation.participants.find(
         (p) => p.toString() !== req.user._id.toString()
       );
-      if (other) resolvedRecipientId = other;
+
+      if (other) {
+        resolvedRecipientId = other;
+      }
     }
 
-    const calculatedMessageType = messageType || determineMessageType(parsedAttachments, 'text');
+    // Compatibility with older conversations that store the customer in userId.
+    if (
+      !resolvedRecipientId &&
+      conversation.userId &&
+      conversation.userId.toString() !== req.user._id.toString()
+    ) {
+      resolvedRecipientId = conversation.userId;
+    }
+
+    if (!resolvedRecipientId && (recipientId || to)) {
+      const requestedRecipientId = recipientId || to;
+
+      if (
+        requestedRecipientId.toString() !== req.user._id.toString()
+      ) {
+        resolvedRecipientId = requestedRecipientId;
+      }
+    }
+
+    const calculatedMessageType =
+      messageType || determineMessageType(parsedAttachments, 'text');
+
     const now = new Date();
 
     const createdMessage = await Message.create({
@@ -348,11 +576,17 @@ const sendMessage = async (req, res) => {
       readAt: null
     });
 
-    const previewText = text.trim() || (calculatedMessageType === 'image' ? '📷 Photo' : '📎 Attachment');
+    const previewText =
+      text.trim() ||
+      (calculatedMessageType === 'image'
+        ? '📷 Photo'
+        : '📎 Attachment');
+
     conversation.lastMessage = previewText;
     conversation.lastMessageType = calculatedMessageType;
     conversation.lastMessageAt = now;
     conversation.lastSender = req.user._id;
+
     await conversation.save();
 
     const populated = await Message.findById(createdMessage._id)
@@ -363,57 +597,127 @@ const sendMessage = async (req, res) => {
     const formattedMessage = safeMessage(populated, req.user._id);
 
     const io = req.app.get('io');
-    if (io) {
-      io.to(conversation._id.toString()).emit('receive_message', formattedMessage);
-      io.to(conversation._id.toString()).emit('new_message', formattedMessage);
+    const conversationRoom = conversation._id.toString();
+    const recipientUserId = resolvedRecipientId
+      ? resolvedRecipientId.toString()
+      : null;
+    const senderId = req.user._id.toString();
 
-      if (Array.isArray(conversation.participants)) {
-        conversation.participants.forEach((participantId) => {
-          io.to(participantId.toString()).emit('notification', {
-            type: 'message',
-            title: `New message from ${req.user.name || 'Admin / Support'}`,
-            message: previewText,
-            conversationId: conversation._id,
-            messageId: formattedMessage._id
-          });
-        });
+    const senderName =
+      req.user.name ||
+      (userRole === 'admin' ? 'Admin' : 'User');
+
+    if (io) {
+      // Immediately deliver to users who are viewing the conversation.
+      io.to(conversationRoom).emit(
+        'receive_message',
+        formattedMessage
+      );
+
+      io.to(conversationRoom).emit(
+        'new_message',
+        formattedMessage
+      );
+
+      // Deliver to the recipient's other connected tabs/devices.
+      if (
+        recipientUserId &&
+        recipientUserId !== senderId
+      ) {
+        emitToUserOutsideConversation(
+          io,
+          recipientUserId,
+          conversationRoom,
+          'receive_message',
+          formattedMessage
+        );
+
+        emitToUserOutsideConversation(
+          io,
+          recipientUserId,
+          conversationRoom,
+          'new_message',
+          formattedMessage
+        );
+
+        const notificationPayload = {
+          type: 'message',
+          title: `New message from ${senderName}`,
+          message: previewText,
+          conversationId: conversation._id.toString(),
+          messageId: String(
+            formattedMessage._id || formattedMessage.id
+          ),
+          senderId,
+          senderName,
+          createdAt: now
+        };
+
+        // Private notification: only the recipient is notified.
+        io.to(recipientUserId).emit(
+          'notification',
+          notificationPayload
+        );
+
+        io.to(recipientUserId).emit(
+          'message_notification',
+          notificationPayload
+        );
       }
     }
 
-    if (resolvedRecipientId && resolvedRecipientId.toString() !== req.user._id.toString()) {
+    // Persist notification and send email without delaying the HTTP response.
+    if (
+      resolvedRecipientId &&
+      resolvedRecipientId.toString() !== req.user._id.toString()
+    ) {
       (async () => {
         try {
           await createNotification({
             userId: resolvedRecipientId,
             type: 'message',
             title: 'New Message',
-            message: `${req.user.name || 'Admin'} sent you a message.`,
+            message: `${senderName} sent you a message.`,
             relatedId: conversation._id,
             relatedType: 'Message',
-            actionUrl: userRole === 'admin' ? '/admin/conversations' : userRole === 'manager' ? '/manager/conversations' : '/user/conversations',
+            actionUrl:
+              userRole === 'admin' || userRole === 'manager'
+                ? '/user/conversations'
+                : '/admin/conversations',
             metadata: {
               conversationId: conversation._id,
               messageId: createdMessage._id,
               senderId: req.user._id,
-              senderName: req.user.name
+              senderName
             }
           });
         } catch (notifErr) {
-          console.error('Message notification error:', notifErr);
+          console.error(
+            'Message notification error:',
+            notifErr
+          );
         }
 
         try {
-          const recipientUser = await User.findById(resolvedRecipientId).select('name email').lean();
+          const recipientUser = await User.findById(
+            resolvedRecipientId
+          )
+            .select('name email')
+            .lean();
+
           if (recipientUser && recipientUser.email) {
             await sendMessageNotificationEmail(
               recipientUser.email,
               recipientUser.name || 'User',
-              req.user.name || 'Admin / Support',
+              senderName,
               previewText
             );
           }
         } catch (emailErr) {
-          console.error('Message notification email failed:', emailErr.message);
+          console.error(
+            'Message notification email failed:',
+            emailErr.message
+          );
         }
       })();
     }
@@ -426,10 +730,15 @@ const sendMessage = async (req, res) => {
     });
   } catch (error) {
     console.error('sendMessage error:', error);
-    return res.status(500).json({ success: false, message: 'Server error sending message.' });
+
+    return res.status(500).json({
+      success: false,
+      message: 'Server error sending message.'
+    });
   }
 };
 
+// Edit an existing message.
 const updateMessage = async (req, res) => {
   try {
     const { id } = req.params;
@@ -437,12 +746,19 @@ const updateMessage = async (req, res) => {
     const newText = body || message || content;
 
     if (!isValidObjectId(id)) {
-      return res.status(400).json({ success: false, message: 'Invalid message ID.' });
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid message ID.'
+      });
     }
 
     const msg = await Message.findById(id);
+
     if (!msg) {
-      return res.status(404).json({ success: false, message: 'Message not found.' });
+      return res.status(404).json({
+        success: false,
+        message: 'Message not found.'
+      });
     }
 
     if (msg.isDeletedForEveryone) {
@@ -453,7 +769,11 @@ const updateMessage = async (req, res) => {
     }
 
     const userRole = String(req.user?.role || '').toLowerCase();
-    if (msg.sender.toString() !== req.user._id.toString() && userRole !== 'admin') {
+
+    if (
+      msg.sender.toString() !== req.user._id.toString() &&
+      userRole !== 'admin'
+    ) {
       return res.status(403).json({
         success: false,
         message: 'Access denied. You can only edit your own messages.'
@@ -461,9 +781,17 @@ const updateMessage = async (req, res) => {
     }
 
     if (newText !== undefined) {
-      if (!newText.trim() && (!Array.isArray(msg.attachments) || msg.attachments.length === 0)) {
-        return res.status(400).json({ success: false, message: 'Message text cannot be empty.' });
+      if (
+        !newText.trim() &&
+        (!Array.isArray(msg.attachments) ||
+          msg.attachments.length === 0)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: 'Message text cannot be empty.'
+        });
       }
+
       msg.body = newText.trim();
       msg.message = newText.trim();
     }
@@ -476,10 +804,13 @@ const updateMessage = async (req, res) => {
       .lean();
 
     const formatted = safeMessage(populated, req.user._id);
-
     const io = req.app.get('io');
+
     if (io) {
-      io.to(msg.conversation.toString()).emit('message_updated', formatted);
+      io.to(msg.conversation.toString()).emit(
+        'message_updated',
+        formatted
+      );
     }
 
     return res.status(200).json({
@@ -489,10 +820,15 @@ const updateMessage = async (req, res) => {
     });
   } catch (error) {
     console.error('updateMessage error:', error);
-    return res.status(500).json({ success: false, message: 'Server error updating message.' });
+
+    return res.status(500).json({
+      success: false,
+      message: 'Server error updating message.'
+    });
   }
 };
 
+// Get the unread message count for the logged-in user.
 const getUnreadMessageCount = async (req, res) => {
   try {
     const unreadCount = await Message.countDocuments({
@@ -507,37 +843,70 @@ const getUnreadMessageCount = async (req, res) => {
     });
   } catch (error) {
     console.error('getUnreadMessageCount error:', error);
-    return res.status(500).json({ success: false, message: 'Server error retrieving unread count.' });
+
+    return res.status(500).json({
+      success: false,
+      message: 'Server error retrieving unread count.'
+    });
   }
 };
 
+// Mark unread messages in a conversation as read.
 const markMessagesAsRead = async (req, res) => {
   try {
     const { conversationId } = req.params;
 
     if (!isValidObjectId(conversationId)) {
-      return res.status(400).json({ success: false, message: 'Invalid conversation ID.' });
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid conversation ID.'
+      });
     }
 
-    const conversation = await Conversation.findById(conversationId).select('participants userId').lean();
+    const conversation = await Conversation.findById(conversationId)
+      .select('participants userId')
+      .lean();
+
     if (!conversation) {
-      return res.status(404).json({ success: false, message: 'Conversation not found.' });
+      return res.status(404).json({
+        success: false,
+        message: 'Conversation not found.'
+      });
     }
 
     const userRole = String(req.user?.role || '').toLowerCase();
-    const isParticipant = Array.isArray(conversation.participants) &&
-      conversation.participants.some((p) => p.toString() === req.user._id.toString());
-    const isLegacyUser = conversation.userId &&
+
+    const isParticipant =
+      Array.isArray(conversation.participants) &&
+      conversation.participants.some(
+        (p) => p.toString() === req.user._id.toString()
+      );
+
+    const isLegacyUser =
+      conversation.userId &&
       conversation.userId.toString() === req.user._id.toString();
 
-    if (!isParticipant && !isLegacyUser && userRole !== 'admin' && userRole !== 'manager') {
+    if (
+      !isParticipant &&
+      !isLegacyUser &&
+      userRole !== 'admin' &&
+      userRole !== 'manager'
+    ) {
       return res.status(403).json({
         success: false,
-        message: 'Access denied. You are not a participant in this conversation.'
+        message:
+          'Access denied. You are not a participant in this conversation.'
       });
     }
 
     const now = new Date();
+
+    const sendersToNotify = await Message.distinct('sender', {
+      conversation: conversationId,
+      recipient: req.user._id,
+      isRead: false
+    });
+
     const result = await Message.updateMany(
       {
         conversation: conversationId,
@@ -553,8 +922,34 @@ const markMessagesAsRead = async (req, res) => {
     );
 
     const io = req.app.get('io');
+
+    const readPayload = {
+      conversationId: conversationId.toString(),
+      readerId: req.user._id.toString(),
+      readAt: now,
+      modifiedCount: result.modifiedCount
+    };
+
     if (io) {
-      io.to(conversationId).emit('messages_read', { conversationId, readerId: req.user._id });
+      io.to(conversationId.toString()).emit(
+        'messages_read',
+        readPayload
+      );
+
+      sendersToNotify.forEach((senderId) => {
+        if (
+          senderId &&
+          senderId.toString() !== req.user._id.toString()
+        ) {
+          emitToUserOutsideConversation(
+            io,
+            senderId.toString(),
+            conversationId.toString(),
+            'messages_read',
+            readPayload
+          );
+        }
+      });
     }
 
     return res.status(200).json({
@@ -564,21 +959,57 @@ const markMessagesAsRead = async (req, res) => {
     });
   } catch (error) {
     console.error('markMessagesAsRead error:', error);
-    return res.status(500).json({ success: false, message: 'Server error marking messages as read.' });
+
+    return res.status(500).json({
+      success: false,
+      message: 'Server error marking messages as read.'
+    });
   }
 };
 
+// Mark a single message as read.
 const markSingleMessageAsRead = async (req, res) => {
   try {
     const messageId = req.params.messageId || req.params.id;
 
     if (!isValidObjectId(messageId)) {
-      return res.status(400).json({ success: false, message: 'Invalid message ID.' });
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid message ID.'
+      });
     }
 
     const message = await Message.findById(messageId);
+
     if (!message) {
-      return res.status(404).json({ success: false, message: 'Message not found.' });
+      return res.status(404).json({
+        success: false,
+        message: 'Message not found.'
+      });
+    }
+
+    // Only the intended recipient may mark this message as read.
+    if (
+      !message.recipient ||
+      message.recipient.toString() !== req.user._id.toString()
+    ) {
+      return res.status(403).json({
+        success: false,
+        message:
+          'Access denied. You can only mark messages sent to you as read.'
+      });
+    }
+
+    if (
+      Array.isArray(message.deletedFor) &&
+      message.deletedFor.some(
+        (uid) => uid.toString() === req.user._id.toString()
+      )
+    ) {
+      return res.status(404).json({
+        success: false,
+        message: 'Message not found.'
+      });
     }
 
     if (!message.isRead) {
@@ -593,10 +1024,33 @@ const markSingleMessageAsRead = async (req, res) => {
       .lean();
 
     const formatted = safeMessage(populated, req.user._id);
-
     const io = req.app.get('io');
+    const conversationId = message.conversation.toString();
+    const readAt = message.readAt || new Date();
+
     if (io) {
-      io.to(message.conversation.toString()).emit('message_read', formatted);
+      io.to(conversationId).emit('message_read', formatted);
+
+      emitToUserOutsideConversation(
+        io,
+        message.sender.toString(),
+        conversationId,
+        'message_read',
+        formatted
+      );
+
+      emitToUserOutsideConversation(
+        io,
+        message.sender.toString(),
+        conversationId,
+        'messages_read',
+        {
+          conversationId,
+          readerId: req.user._id.toString(),
+          messageId: message._id.toString(),
+          readAt
+        }
+      );
     }
 
     return res.status(200).json({
@@ -606,21 +1060,33 @@ const markSingleMessageAsRead = async (req, res) => {
     });
   } catch (error) {
     console.error('markSingleMessageAsRead error:', error);
-    return res.status(500).json({ success: false, message: 'Server error marking message as read.' });
+
+    return res.status(500).json({
+      success: false,
+      message: 'Server error marking message as read.'
+    });
   }
 };
 
+// Delete a message only for the current user.
 const deleteMessageForMe = async (req, res) => {
   try {
     const { id } = req.params;
 
     if (!isValidObjectId(id)) {
-      return res.status(400).json({ success: false, message: 'Invalid message ID.' });
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid message ID.'
+      });
     }
 
     const message = await Message.findById(id).select('_id').lean();
+
     if (!message) {
-      return res.status(404).json({ success: false, message: 'Message not found.' });
+      return res.status(404).json({
+        success: false,
+        message: 'Message not found.'
+      });
     }
 
     await Message.findByIdAndUpdate(id, {
@@ -634,30 +1100,48 @@ const deleteMessageForMe = async (req, res) => {
     });
   } catch (error) {
     console.error('deleteMessageForMe error:', error);
-    return res.status(500).json({ success: false, message: 'Server error deleting message for you.' });
+
+    return res.status(500).json({
+      success: false,
+      message: 'Server error deleting message for you.'
+    });
   }
 };
 
+// Delete a message for everyone.
 const deleteMessageForEveryone = async (req, res) => {
   try {
     const { id } = req.params;
 
     if (!isValidObjectId(id)) {
-      return res.status(400).json({ success: false, message: 'Invalid message ID.' });
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid message ID.'
+      });
     }
 
     const message = await Message.findById(id);
+
     if (!message) {
-      return res.status(404).json({ success: false, message: 'Message not found.' });
+      return res.status(404).json({
+        success: false,
+        message: 'Message not found.'
+      });
     }
 
     const userRole = String(req.user?.role || '').toLowerCase();
-    const isSender = message.sender.toString() === req.user._id.toString();
+    const isSender =
+      message.sender.toString() === req.user._id.toString();
 
-    if (!isSender && userRole !== 'admin' && userRole !== 'manager') {
+    if (
+      !isSender &&
+      userRole !== 'admin' &&
+      userRole !== 'manager'
+    ) {
       return res.status(403).json({
         success: false,
-        message: 'Access denied. Only the sender or an admin/manager can delete this message for everyone.'
+        message:
+          'Access denied. Only the sender or an admin/manager can delete this message for everyone.'
       });
     }
 
@@ -667,11 +1151,19 @@ const deleteMessageForEveryone = async (req, res) => {
     message.body = 'This message was deleted';
     message.message = 'This message was deleted';
     message.attachments = [];
+
     await message.save();
 
     await Conversation.findOneAndUpdate(
-      { _id: message.conversation, lastMessageAt: message.createdAt },
-      { $set: { lastMessage: 'This message was deleted' } }
+      {
+        _id: message.conversation,
+        lastMessageAt: message.createdAt
+      },
+      {
+        $set: {
+          lastMessage: 'This message was deleted'
+        }
+      }
     );
 
     const populated = await Message.findById(message._id)
@@ -681,10 +1173,13 @@ const deleteMessageForEveryone = async (req, res) => {
       .lean();
 
     const formatted = safeMessage(populated, req.user._id);
-
     const io = req.app.get('io');
+
     if (io) {
-      io.to(message.conversation.toString()).emit('message_deleted', formatted);
+      io.to(message.conversation.toString()).emit(
+        'message_deleted',
+        formatted
+      );
     }
 
     return res.status(200).json({
@@ -694,43 +1189,76 @@ const deleteMessageForEveryone = async (req, res) => {
     });
   } catch (error) {
     console.error('deleteMessageForEveryone error:', error);
-    return res.status(500).json({ success: false, message: 'Server error deleting message for everyone.' });
+
+    return res.status(500).json({
+      success: false,
+      message: 'Server error deleting message for everyone.'
+    });
   }
 };
 
+// Keep the existing generic delete route compatible.
 const deleteMessage = async (req, res) => {
   try {
     const messageId = req.params.id;
-    const deleteType = String(req.query.type || req.body.type || req.body.deleteType || '').toLowerCase();
+
+    const deleteType = String(
+      req.query.type ||
+      req.body.type ||
+      req.body.deleteType ||
+      ''
+    ).toLowerCase();
 
     if (!isValidObjectId(messageId)) {
-      return res.status(400).json({ success: false, message: 'Invalid message ID.' });
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid message ID.'
+      });
     }
 
     if (deleteType === 'me' || deleteType === 'for_me') {
       return deleteMessageForMe(req, res);
     }
 
-    if (deleteType === 'everyone' || deleteType === 'for_everyone') {
+    if (
+      deleteType === 'everyone' ||
+      deleteType === 'for_everyone'
+    ) {
       return deleteMessageForEveryone(req, res);
     }
 
-    const message = await Message.findById(messageId).select('sender').lean();
+    const message = await Message.findById(messageId)
+      .select('sender')
+      .lean();
+
     if (!message) {
-      return res.status(404).json({ success: false, message: 'Message not found.' });
+      return res.status(404).json({
+        success: false,
+        message: 'Message not found.'
+      });
     }
 
     const userRole = String(req.user?.role || '').toLowerCase();
-    const isSender = message.sender.toString() === req.user._id.toString();
 
-    if (isSender || userRole === 'admin' || userRole === 'manager') {
+    const isSender =
+      message.sender.toString() === req.user._id.toString();
+
+    if (
+      isSender ||
+      userRole === 'admin' ||
+      userRole === 'manager'
+    ) {
       return deleteMessageForEveryone(req, res);
     }
 
     return deleteMessageForMe(req, res);
   } catch (error) {
     console.error('deleteMessage error:', error);
-    return res.status(500).json({ success: false, message: 'Server error deleting message.' });
+
+    return res.status(500).json({
+      success: false,
+      message: 'Server error deleting message.'
+    });
   }
 };
 
