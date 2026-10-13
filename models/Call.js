@@ -109,7 +109,6 @@ CallSchema.index({ userId: 1, createdAt: -1 });
 CallSchema.index({ user: 1, createdAt: -1 });
 CallSchema.index({ contactId: 1, createdAt: -1 });
 CallSchema.index({ contact: 1, createdAt: -1 });
-CallSchema.index({ callSid: 1 });
 CallSchema.index({ createdAt: -1 });
 
 module.exports = mongoose.model('Call', CallSchema);

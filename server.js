@@ -7,8 +7,6 @@
 require("dotenv").config();
 
 const dns = require("dns");
-
-// DNS fallback
 dns.setServers(["1.1.1.1", "8.8.8.8"]);
 
 // =====================================================
@@ -38,7 +36,6 @@ const {
 
 const app = express();
 const server = http.createServer(app);
-
 const PORT = process.env.PORT || 5000;
 
 const normalizeOrigin = (origin) =>
@@ -49,12 +46,27 @@ const allowedOrigins = new Set([
   "http://127.0.0.1:3000",
   "http://localhost:5173",
   "https://localpro1.net",
+  "https://www.localpro1.net",
 ]);
 
 if (process.env.FRONTEND_URL) {
   for (const origin of process.env.FRONTEND_URL.split(",")) {
     const normalized = normalizeOrigin(origin.trim());
     if (normalized) allowedOrigins.add(normalized);
+  }
+}
+
+if (process.env.FRONTEND_LOGIN_URL) {
+  const normalized = normalizeOrigin(
+    process.env.FRONTEND_LOGIN_URL.trim()
+  );
+
+  if (normalized) {
+    try {
+      allowedOrigins.add(new URL(normalized).origin);
+    } catch {
+      console.warn("[CORS] Invalid FRONTEND_LOGIN_URL.");
+    }
   }
 }
 
@@ -70,14 +82,7 @@ const corsOrigin = (origin, callback) => {
 const corsOptions = {
   origin: corsOrigin,
   credentials: true,
-  methods: [
-    "GET",
-    "POST",
-    "PUT",
-    "PATCH",
-    "DELETE",
-    "OPTIONS",
-  ],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: [
     "Content-Type",
     "Authorization",
@@ -89,7 +94,7 @@ const corsOptions = {
 };
 
 // =====================================================
-// SOCKET.IO — REAL-TIME FOUNDATION (OPTIMIZED FOR 1S LATENCY)
+// SOCKET.IO
 // =====================================================
 
 const io = new Server(server, {
@@ -102,38 +107,40 @@ const io = new Server(server, {
   pingInterval: 10000,
   pingTimeout: 5000,
   connectTimeout: 10000,
-  maxHttpBufferSize: 5e6, // Increased buffer size for fast file transfer (5MB)
+  maxHttpBufferSize: 5e6,
 });
 
-// Make Socket.IO available to controllers and routes.
 app.set("io", io);
 
-// Connected online users tracking map for blue tick / active status
 const activeUsers = new Map();
 
 io.on("connection", (socket) => {
   console.log(`[Socket.IO] Connected: ${socket.id}`);
 
-  // User join personal room or online status register
   socket.on("user_join", (userId) => {
     if (userId) {
-      activeUsers.set(userId, socket.id);
-      socket.join(userId);
-      // Broadcast online status to all users/admin
-      io.emit("update_user_status", { userId, status: "online" });
-      console.log(`[Socket.IO] User online & joined room: ${userId}`);
+      const id = String(userId);
+      activeUsers.set(id, socket.id);
+      socket.join(id);
+
+      io.emit("update_user_status", {
+        userId: id,
+        status: "online",
+      });
+
+      console.log(`[Socket.IO] User online & joined room: ${id}`);
     }
   });
 
-  // Join Conversation / Group Room
   socket.on("join_room", (roomId) => {
     if (roomId) {
       socket.join(roomId);
-      console.log(`[Socket.IO] Socket ${socket.id} joined room: ${roomId}`);
+      console.log(
+        `[Socket.IO] Socket ${socket.id} joined room: ${roomId}`
+      );
     }
   });
 
-  // Leave Conversation / Group Room
   socket.on("leave_room", (roomId) => {
     if (roomId) {
       socket.leave(roomId);
@@ -141,15 +148,23 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", (reason) => {
-    for (let [userId, sId] of activeUsers.entries()) {
-      if (sId === socket.id) {
+    for (const [userId, socketId] of activeUsers.entries()) {
+      if (socketId === socket.id) {
         activeUsers.delete(userId);
-        io.emit("update_user_status", { userId, status: "offline" });
+
+        io.emit("update_user_status", {
+          userId,
+          status: "offline",
+        });
+
         console.log(`[Socket.IO] User offline: ${userId}`);
         break;
       }
     }
-    console.log(`[Socket.IO] Disconnected: ${socket.id} (${reason})`);
+
+    console.log(
+      `[Socket.IO] Disconnected: ${socket.id} (${reason})`
+    );
   });
 
   socket.on("error", (error) => {
@@ -182,7 +197,7 @@ const loadRouter = (routePath) => {
     return routeModule.default;
   }
 
-  console.error(`Invalid router export from ${routePath}`);
+  console.error(`[Server] Invalid router export from ${routePath}`);
 
   throw new TypeError(
     `Route file ${routePath} does not export an Express router.`
@@ -194,7 +209,6 @@ const loadRouter = (routePath) => {
 // =====================================================
 
 const uploadsDir = path.join(__dirname, "uploads");
-
 fs.mkdirSync(uploadsDir, { recursive: true });
 
 // =====================================================
@@ -202,14 +216,9 @@ fs.mkdirSync(uploadsDir, { recursive: true });
 // =====================================================
 
 app.use(cors(corsOptions));
-
 app.use(cookieParser());
 
-app.use(
-  express.json({
-    limit: "50mb",
-  })
-);
+app.use(express.json({ limit: "50mb" }));
 
 app.use(
   express.urlencoded({
@@ -227,9 +236,7 @@ app.use(
   express.static(uploadsDir, {
     index: false,
     dotfiles: "deny",
-    maxAge: process.env.NODE_ENV === "production"
-      ? "1d"
-      : 0,
+    maxAge: process.env.NODE_ENV === "production" ? "1d" : 0,
     setHeaders(res) {
       res.setHeader("X-Content-Type-Options", "nosniff");
     },
@@ -261,45 +268,31 @@ app.get("/health", (req, res) => {
 // ATTENDANCE EMAILS
 // =====================================================
 
-app.post(
-  "/api/send-attendance-reminders",
-  async (req, res) => {
-    try {
-      console.log(
-        "[Attendance Email] Manual sending started."
-      );
+app.post("/api/send-attendance-reminders", async (req, res) => {
+  try {
+    console.log("[Attendance Email] Manual sending started.");
 
-      const result = await sendDailyAttendanceEmails();
+    const result = await sendDailyAttendanceEmails();
 
-      console.log(
-        "[Attendance Email] Completed:",
-        result
-      );
+    console.log("[Attendance Email] Completed:", result);
 
-      return res.status(200).json({
-        success: true,
-        message:
-          "Attendance reminder emails sent successfully.",
-        result,
-      });
-    } catch (error) {
-      console.error(
-        "[Attendance Email] Error:",
-        error
-      );
+    return res.status(200).json({
+      success: true,
+      message: "Attendance reminder emails sent successfully.",
+      result,
+    });
+  } catch (error) {
+    console.error("[Attendance Email] Error:", error);
 
-      return res.status(500).json({
-        success: false,
-        message:
-          "Failed to send attendance reminder emails.",
-      });
-    }
+    return res.status(500).json({
+      success: false,
+      message: "Failed to send attendance reminder emails.",
+    });
   }
-);
+});
 
 // =====================================================
 // API ROUTES
-// Existing routes preserved
 // =====================================================
 
 const routes = [
@@ -310,11 +303,8 @@ const routes = [
   ["/api/notifications", "./routes/notificationRoutes"],
   ["/api/tasks", "./routes/taskRoutes"],
   ["/api/dashboard", "./routes/dashboardRoutes"],
-
-  // Messaging
   ["/api/conversations", "./routes/conversationRoutes"],
   ["/api/messages", "./routes/messageRoutes"],
-
   ["/api/attendance", "./routes/attendanceRoutes"],
   ["/api/events", "./routes/eventRoutes"],
   ["/api/calendar", "./routes/calendarRoutes"],
@@ -386,12 +376,17 @@ app.use((error, req, res, next) => {
 });
 
 // =====================================================
-// ATTENDANCE SCHEDULER
+// SCHEDULER STATE
 // =====================================================
 
 let attendanceScheduler = null;
 let attendanceEmailSchedulerStarted = false;
 let shuttingDown = false;
+let serverStarted = false;
+
+// =====================================================
+// ATTENDANCE SCHEDULER
+// =====================================================
 
 const startAttendanceScheduler = () => {
   try {
@@ -399,12 +394,8 @@ const startAttendanceScheduler = () => {
       processAttendanceNotifications,
     } = require("./controllers/attendanceController");
 
-    if (
-      typeof processAttendanceNotifications !== "function"
-    ) {
-      console.warn(
-        "[Attendance] Processing function unavailable."
-      );
+    if (typeof processAttendanceNotifications !== "function") {
+      console.warn("[Attendance] Processing function unavailable.");
       return;
     }
 
@@ -428,30 +419,20 @@ const startAttendanceScheduler = () => {
       });
 
     attendanceScheduler = setInterval(async () => {
-      try {
-        const result =
-          await processAttendanceNotifications();
+      if (shuttingDown) return;
 
-        console.log(
-          "[Attendance] Scheduler completed:",
-          result
-        );
+      try {
+        const result = await processAttendanceNotifications();
+
+        console.log("[Attendance] Scheduler completed:", result);
       } catch (error) {
-        console.error(
-          "[Attendance] Scheduler error:",
-          error
-        );
+        console.error("[Attendance] Scheduler error:", error);
       }
     }, 60 * 1000);
 
-    console.log(
-      "[Attendance] Scheduler started (60 seconds)."
-    );
+    console.log("[Attendance] Scheduler started (60 seconds).");
   } catch (error) {
-    console.error(
-      "[Attendance] Failed to start scheduler:",
-      error
-    );
+    console.error("[Attendance] Failed to start scheduler:", error);
   }
 };
 
@@ -461,12 +442,8 @@ const startAttendanceScheduler = () => {
 
 const startAttendanceEmailSchedulerSafe = () => {
   try {
-    if (
-      typeof startAttendanceEmailScheduler !== "function"
-    ) {
-      console.warn(
-        "[Attendance Email] Scheduler unavailable."
-      );
+    if (typeof startAttendanceEmailScheduler !== "function") {
+      console.warn("[Attendance Email] Scheduler unavailable.");
       return;
     }
 
@@ -477,9 +454,7 @@ const startAttendanceEmailSchedulerSafe = () => {
     startAttendanceEmailScheduler();
     attendanceEmailSchedulerStarted = true;
 
-    console.log(
-      "[Attendance Email] Scheduler started."
-    );
+    console.log("[Attendance Email] Scheduler started.");
   } catch (error) {
     console.error(
       "[Attendance Email] Scheduler startup failed:",
@@ -491,21 +466,16 @@ const startAttendanceEmailSchedulerSafe = () => {
 const stopAttendanceEmailSchedulerSafe = () => {
   try {
     if (
-      typeof stopAttendanceEmailScheduler !== "function"
+      typeof stopAttendanceEmailScheduler !== "function" ||
+      !attendanceEmailSchedulerStarted
     ) {
-      return;
-    }
-
-    if (!attendanceEmailSchedulerStarted) {
       return;
     }
 
     stopAttendanceEmailScheduler();
     attendanceEmailSchedulerStarted = false;
 
-    console.log(
-      "[Attendance Email] Scheduler stopped."
-    );
+    console.log("[Attendance Email] Scheduler stopped.");
   } catch (error) {
     console.error(
       "[Attendance Email] Scheduler shutdown failed:",
@@ -522,33 +492,40 @@ const startServer = async () => {
   try {
     await connectDB();
 
-    console.log(
-      "[Database] MongoDB connection established."
-    );
+    if (shuttingDown) {
+      return;
+    }
+
+    console.log("[Database] MongoDB connection established.");
 
     server.listen(PORT, () => {
-      console.log(
-        `[Server] Running on port ${PORT}`
-      );
+      serverStarted = true;
 
+      console.log(`[Server] Running on port ${PORT}`);
       console.log(
         `[Environment] ${process.env.NODE_ENV || "development"}`
       );
-
       console.log(
         "[Socket.IO] Real-server initialized with speed optimizations."
       );
+
+      startAttendanceScheduler();
+      startAttendanceEmailSchedulerSafe();
     });
 
-    startAttendanceScheduler();
-    startAttendanceEmailSchedulerSafe();
-  } catch (error) {
-    console.error(
-      "[Server] Failed to start:",
-      error
-    );
+    server.on("error", (error) => {
+      console.error("[Server] HTTP server error:", error);
 
-    process.exit(1);
+      if (error.code === "EADDRINUSE") {
+        console.error(`[Server] Port ${PORT} is already in use.`);
+      }
+    });
+  } catch (error) {
+    console.error("[Server] Failed to start:", error.message);
+
+    // Do not keep a broken process running without a database.
+    // Exit code lets the process manager report the startup failure.
+    process.exitCode = 1;
   }
 };
 
@@ -563,9 +540,7 @@ const shutdown = async (signal) => {
 
   shuttingDown = true;
 
-  console.log(
-    `[Server] ${signal} received. Shutting down...`
-  );
+  console.log(`[Server] ${signal} received. Shutting down...`);
 
   if (attendanceScheduler) {
     clearInterval(attendanceScheduler);
@@ -574,22 +549,60 @@ const shutdown = async (signal) => {
 
   stopAttendanceEmailSchedulerSafe();
 
-  io.close();
-
-  server.close(() => {
-    console.log("[Server] HTTP server closed.");
-    process.exit(0);
-  });
-
-  setTimeout(() => {
-    console.error(
-      "[Server] Forced shutdown after timeout."
-    );
+  const forceShutdownTimer = setTimeout(() => {
+    console.error("[Server] Forced shutdown after timeout.");
     process.exit(1);
-  }, 10000).unref();
+  }, 10000);
+
+  forceShutdownTimer.unref();
+
+  try {
+    if (serverStarted && server.listening) {
+      await new Promise((resolve) => {
+        server.close((error) => {
+          if (error) {
+            console.error("[Server] HTTP close error:", error.message);
+          } else {
+            console.log("[Server] HTTP server closed.");
+          }
+
+          resolve();
+        });
+      });
+    }
+
+    await new Promise((resolve) => {
+      io.close(() => resolve());
+    });
+
+    const { closeMongoDB } = require("./config/db");
+    await closeMongoDB();
+
+    clearTimeout(forceShutdownTimer);
+
+    console.log("[Server] Shutdown completed.");
+    process.exit(0);
+  } catch (error) {
+    console.error("[Server] Shutdown error:", error.message);
+    process.exit(1);
+  }
 };
 
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => {
+  void shutdown("SIGINT");
+});
+
+process.on("SIGTERM", () => {
+  void shutdown("SIGTERM");
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[Process] Unhandled promise rejection:", reason);
+});
+
+process.on("uncaughtException", (error) => {
+  console.error("[Process] Uncaught exception:", error);
+  void shutdown("uncaughtException");
+});
 
 startServer();

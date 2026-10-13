@@ -1,27 +1,20 @@
 const mongoose = require("mongoose");
 
 // =====================================================
-// MongoDB Connection Caching for Serverless / Hot-Reload
+// MongoDB Connection Caching
 // =====================================================
 let cachedConnection = null;
 
 // =====================================================
 // MongoDB Connection
 // =====================================================
-
 const connectDB = async () => {
-  // If connection is already established, reuse it instantly to eliminate 20s delay
   if (cachedConnection && mongoose.connection.readyState === 1) {
     return cachedConnection;
   }
 
   try {
-    const isProduction =
-      process.env.NODE_ENV === "production";
-
-    // =================================================
-    // Select MongoDB URI
-    // =================================================
+    const isProduction = process.env.NODE_ENV === "production";
 
     const mongoUri = isProduction
       ? process.env.MONGO_URI?.trim()
@@ -29,10 +22,6 @@ const connectDB = async () => {
           process.env.MONGO_LOCAL_URI?.trim() ||
           "mongodb://127.0.0.1:27017/local-pro-1"
         );
-
-    // =================================================
-    // Validate URI
-    // =================================================
 
     if (!mongoUri) {
       throw new Error(
@@ -51,84 +40,44 @@ const connectDB = async () => {
       );
     }
 
-    // =================================================
-    // Hide MongoDB credentials in terminal
-    // =================================================
+    let safeUri = mongoUri;
 
-    const safeUri = mongoUri.replace(
-      /\/\/.*?:.*?@/,
-      "//***:***@"
-    );
+    try {
+      const parsedUri = new URL(mongoUri);
+      if (parsedUri.username || parsedUri.password) {
+        parsedUri.username = "***";
+        parsedUri.password = "***";
+      }
+      safeUri = parsedUri.toString();
+    } catch {
+      safeUri = "[MongoDB URI hidden]";
+    }
 
     console.log("=================================");
     console.log("MongoDB Connection");
     console.log("=================================");
-    console.log(
-      `Environment: ${
-        isProduction ? "production" : "development"
-      }`
-    );
-    console.log(
-      `Database: ${
-        isProduction
-          ? "MongoDB Atlas"
-          : "Local MongoDB"
-      }`
-    );
+    console.log(`Environment: ${isProduction ? "production" : "development"}`);
+    console.log(`Database: ${isProduction ? "MongoDB Atlas" : "Configured development database"}`);
     console.log("MongoDB URI:", safeUri);
-
-    // =================================================
-    // Connect MongoDB
-    // =================================================
-
     console.log("MongoDB: Connecting...");
 
-    const conn = await mongoose.connect(
-      mongoUri,
-      {
-        // Fail reasonably fast if Atlas/server is unavailable.
-        serverSelectionTimeoutMS: isProduction
-          ? 10000
-          : 5000,
-
-        connectTimeoutMS: isProduction
-          ? 10000
-          : 5000,
-
-        // Prevent a dead socket from hanging forever.
-        socketTimeoutMS: 30000,
-
-        // Connection pool.
-        maxPoolSize: isProduction ? 20 : 10,
-        minPoolSize: isProduction ? 2 : 0,
-
-        // MongoDB retry support.
-        retryWrites: true,
-
-        // Keep connection state healthy.
-        heartbeatFrequencyMS: 10000,
-
-        // Do not automatically create indexes on every
-        // production startup. Indexes should be managed
-        // deliberately for production performance.
-        autoIndex: !isProduction,
-      }
-    );
+    const conn = await mongoose.connect(mongoUri, {
+      serverSelectionTimeoutMS: isProduction ? 10000 : 5000,
+      connectTimeoutMS: isProduction ? 10000 : 5000,
+      socketTimeoutMS: 30000,
+      maxPoolSize: isProduction ? 20 : 10,
+      minPoolSize: isProduction ? 2 : 0,
+      retryWrites: true,
+      heartbeatFrequencyMS: 10000,
+      autoIndex: !isProduction,
+    });
 
     cachedConnection = conn;
-
-    // =================================================
-    // Connection successful
-    // =================================================
 
     console.log("=================================");
     console.log("MongoDB Connected Successfully");
     console.log(`Host: ${conn.connection.host}`);
-    console.log(
-      `Database: ${
-        conn.connection.name || "default"
-      }`
-    );
+    console.log(`Database: ${conn.connection.name || "default"}`);
     console.log("=================================");
 
     return conn;
@@ -138,99 +87,44 @@ const connectDB = async () => {
     console.error("=================================");
     console.error("Error:", error.message);
 
-    // =================================================
-    // Development-specific error
-    // =================================================
-
     if (process.env.NODE_ENV !== "production") {
-      console.error("");
-      console.error(
-        "Make sure MongoDB is running locally."
-      );
-      console.error(
-        "Expected local MongoDB URI:"
-      );
-      console.error(
-        "mongodb://127.0.0.1:27017/local-pro-1"
-      );
-      console.error("");
+      console.error("Check that your configured development MongoDB is accessible.");
+    } else {
+      console.error("Check MONGO_URI, Atlas IP access list, database credentials, and cluster status.");
     }
 
-    // =================================================
-    // Production-specific error
-    // =================================================
-
-    if (process.env.NODE_ENV === "production") {
-      console.error("");
-      console.error(
-        "Check your MongoDB Atlas connection:"
-      );
-      console.error("1. MONGO_URI is correct");
-      console.error("2. MongoDB Atlas IP access list");
-      console.error("3. Database username/password");
-      console.error("4. MongoDB Atlas cluster status");
-      console.error("");
-    }
-
-    // Do not start Express without MongoDB.
-    process.exit(1);
+    throw error;
   }
 };
 
 // =====================================================
 // Mongoose Events
 // =====================================================
+mongoose.connection.on("connected", () => {
+  console.log("Mongoose: connection established.");
+});
 
-mongoose.connection.on(
-  "connected",
-  () => {
-    console.log(
-      "Mongoose: connection established."
-    );
-  }
-);
+mongoose.connection.on("error", (error) => {
+  console.error("Mongoose connection error:", error.message);
+});
 
-mongoose.connection.on(
-  "error",
-  (error) => {
-    console.error(
-      "Mongoose connection error:",
-      error.message
-    );
-  }
-);
-
-mongoose.connection.on(
-  "disconnected",
-  () => {
-    console.warn(
-      "Mongoose: MongoDB disconnected."
-    );
-    cachedConnection = null;
-  }
-);
+mongoose.connection.on("disconnected", () => {
+  console.warn("Mongoose: MongoDB disconnected.");
+  cachedConnection = null;
+});
 
 // =====================================================
 // Graceful MongoDB Shutdown
 // =====================================================
-
 const closeMongoDB = async () => {
   try {
-    if (
-      mongoose.connection.readyState !== 0
-    ) {
+    if (mongoose.connection.readyState !== 0) {
       await mongoose.connection.close();
       cachedConnection = null;
-
-      console.log(
-        "MongoDB connection closed."
-      );
+      console.log("MongoDB connection closed.");
     }
   } catch (error) {
-    console.error(
-      "Error closing MongoDB:",
-      error.message
-    );
+    console.error("Error closing MongoDB:", error.message);
   }
 };
 

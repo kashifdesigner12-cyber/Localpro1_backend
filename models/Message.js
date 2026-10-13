@@ -92,14 +92,12 @@ const MessageSchema = new mongoose.Schema(
       {
         type: mongoose.Schema.Types.ObjectId,
         ref: "User",
-        index: true,
       },
     ],
 
     isDeletedForEveryone: {
       type: Boolean,
       default: false,
-      index: true,
     },
 
     deletedForEveryoneAt: {

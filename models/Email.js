@@ -106,7 +106,8 @@ EmailSchema.index({ userId: 1, createdAt: -1 });
 EmailSchema.index({ user: 1, createdAt: -1 });
 EmailSchema.index({ contactId: 1, createdAt: -1 });
 EmailSchema.index({ conversationId: 1 });
-EmailSchema.index({ providerMessageId: 1 });
+// providerMessageId ka index yahan remove kiya gaya hai
+// kyun ke warning existing duplicate index ki wajah se aa rahi thi.
 EmailSchema.index({ isRead: 1 });
 
 module.exports = mongoose.model('Email', EmailSchema);
