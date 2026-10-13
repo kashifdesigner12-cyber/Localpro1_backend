@@ -88,24 +88,6 @@ const MessageSchema = new mongoose.Schema(
       default: "internal",
     },
 
-    /*
-     * =========================================================
-     * MESSAGE DELETION (DELETE FOR ME & DELETE FOR EVERYONE)
-     * =========================================================
-     *
-     * deletedFor:
-     *   Array of User ObjectIds who deleted this message for themselves.
-     *
-     * isDeletedForEveryone:
-     *   Flag indicating if the message was retracted by the sender/admin.
-     *
-     * deletedForEveryoneAt:
-     *   Timestamp when the message was deleted for everyone.
-     *
-     * deletedBy:
-     *   The user who triggered delete for everyone.
-     */
-
     deletedFor: [
       {
         type: mongoose.Schema.Types.ObjectId,
@@ -143,13 +125,12 @@ const MessageSchema = new mongoose.Schema(
 
 // Custom validation: Message body or at least one attachment must exist
 MessageSchema.pre("validate", function (next) {
-  // If message is deleted for everyone, skip body requirement
   if (this.isDeletedForEveryone) {
     return next();
   }
 
-  const hasBody = Boolean(this.body && this.body.trim().length > 0);
-  const hasMessage = Boolean(this.message && this.message.trim().length > 0);
+  const hasBody = Boolean(this.body && String(this.body).trim().length > 0);
+  const hasMessage = Boolean(this.message && String(this.message).trim().length > 0);
   const hasAttachments = Boolean(
     Array.isArray(this.attachments) && this.attachments.length > 0
   );
@@ -158,7 +139,6 @@ MessageSchema.pre("validate", function (next) {
     this.invalidate("body", "Message text or an attachment file is required.");
   }
 
-  // Ensure body and message match for compatibility
   if (hasBody && !hasMessage) {
     this.message = this.body;
   } else if (hasMessage && !hasBody) {

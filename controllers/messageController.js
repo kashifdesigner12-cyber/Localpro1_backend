@@ -8,7 +8,6 @@ const { sendMessageNotificationEmail } = require('../utils/sendEmail');
 const isValidObjectId = (id) =>
   Boolean(id) && mongoose.Types.ObjectId.isValid(id);
 
-// Safe user ref helper without heavy Base64 payload
 const safeUserRef = (u) => {
   if (!u) return null;
   if (typeof u === 'object' && u._id) {
@@ -31,7 +30,6 @@ const safeUserRef = (u) => {
   return u;
 };
 
-// Safe message response helper with delete support
 const safeMessage = (msg, currentUserId = null) => {
   if (!msg) return null;
 
@@ -72,7 +70,6 @@ const safeMessage = (msg, currentUserId = null) => {
   };
 };
 
-// Helper to determine message type based on attachments
 const determineMessageType = (attachments, defaultType = 'text') => {
   if (!Array.isArray(attachments) || attachments.length === 0) {
     return defaultType;
@@ -85,7 +82,6 @@ const determineMessageType = (attachments, defaultType = 'text') => {
   return 'file';
 };
 
-// GET /api/messages/:conversationId (authenticated user)
 const getMessages = async (req, res) => {
   try {
     const { conversationId } = req.params;
@@ -153,7 +149,6 @@ const getMessages = async (req, res) => {
   }
 };
 
-// GET /api/messages/detail/:id or GET /api/messages/single/:id (authenticated user)
 const getMessageById = async (req, res) => {
   try {
     const { id } = req.params;
@@ -203,7 +198,6 @@ const getMessageById = async (req, res) => {
   }
 };
 
-// POST /api/messages or POST /api/messages/send (authenticated user + file support)
 const sendMessage = async (req, res) => {
   try {
     const { conversationId, recipientId, to, body, message, content, messageType } = req.body;
@@ -219,8 +213,23 @@ const sendMessage = async (req, res) => {
 
     let parsedAttachments = Array.isArray(rawAttachments) ? [...rawAttachments] : [];
 
-    if (req.files && Array.isArray(req.files) && req.files.length > 0) {
-      const uploadedList = req.files.map((file) => ({
+    const incomingFiles = [];
+    if (req.files) {
+      if (Array.isArray(req.files)) {
+        incomingFiles.push(...req.files);
+      } else if (typeof req.files === 'object') {
+        Object.values(req.files).forEach((fileArr) => {
+          if (Array.isArray(fileArr)) incomingFiles.push(...fileArr);
+          else if (fileArr) incomingFiles.push(fileArr);
+        });
+      }
+    }
+    if (req.file) {
+      incomingFiles.push(req.file);
+    }
+
+    if (incomingFiles.length > 0) {
+      const uploadedList = incomingFiles.map((file) => ({
         url: `/uploads/${file.filename}`,
         filename: file.filename,
         originalName: file.originalname,
@@ -229,16 +238,18 @@ const sendMessage = async (req, res) => {
         size: file.size
       }));
       parsedAttachments = [...parsedAttachments, ...uploadedList];
-    } else if (req.file) {
-      parsedAttachments.push({
-        url: `/uploads/${req.file.filename}`,
-        filename: req.file.filename,
-        originalName: req.file.originalname,
-        fileType: req.file.mimetype.split('/')[0] || 'file',
-        mimeType: req.file.mimetype,
-        size: req.file.size
-      });
     }
+
+    const uniqueAttachments = [];
+    const seenUrls = new Set();
+    for (const att of parsedAttachments) {
+      const identifier = att.url || att.filename;
+      if (identifier && !seenUrls.has(identifier)) {
+        seenUrls.add(identifier);
+        uniqueAttachments.push(att);
+      }
+    }
+    parsedAttachments = uniqueAttachments;
 
     const text = body || message || content || '';
 
@@ -287,7 +298,7 @@ const sendMessage = async (req, res) => {
       }
 
       conversation = await Conversation.findOne({
-        participants: { $all: [req.user._id, targetUserId], $size: 2 }
+        participants: { $all: [req.user._id, targetUserId],$size: 2 }
       });
 
       if (!conversation) {
@@ -334,7 +345,31 @@ const sendMessage = async (req, res) => {
     conversation.lastSender = req.user._id;
     await conversation.save();
 
-    // Fast non-blocking notifications & email dispatch
+    const populated = await Message.findById(createdMessage._id)
+      .populate('sender', 'name email role avatar')
+      .populate('recipient', 'name email role avatar')
+      .lean();
+
+    const formattedMessage = safeMessage(populated, req.user._id);
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to(conversation._id.toString()).emit('receive_message', formattedMessage);
+      io.to(conversation._id.toString()).emit('new_message', formattedMessage);
+
+      if (Array.isArray(conversation.participants)) {
+        conversation.participants.forEach((participantId) => {
+          io.to(participantId.toString()).emit('notification', {
+            type: 'message',
+            title: `New message from ${req.user.name || 'User'}`,
+            message: previewText,
+            conversationId: conversation._id,
+            messageId: formattedMessage._id
+          });
+        });
+      }
+    }
+
     if (resolvedRecipientId && resolvedRecipientId.toString() !== req.user._id.toString()) {
       (async () => {
         try {
@@ -373,13 +408,6 @@ const sendMessage = async (req, res) => {
       })();
     }
 
-    const populated = await Message.findById(createdMessage._id)
-      .populate('sender', 'name email role avatar')
-      .populate('recipient', 'name email role avatar')
-      .lean();
-
-    const formattedMessage = safeMessage(populated, req.user._id);
-
     return res.status(201).json({
       success: true,
       message: 'Message sent successfully.',
@@ -392,7 +420,6 @@ const sendMessage = async (req, res) => {
   }
 };
 
-// PUT /api/messages/:id or PATCH /api/messages/:id (authenticated user)
 const updateMessage = async (req, res) => {
   try {
     const { id } = req.params;
@@ -440,6 +467,11 @@ const updateMessage = async (req, res) => {
 
     const formatted = safeMessage(populated, req.user._id);
 
+    const io = req.app.get('io');
+    if (io) {
+      io.to(msg.conversation.toString()).emit('message_updated', formatted);
+    }
+
     return res.status(200).json({
       success: true,
       message: 'Message updated successfully.',
@@ -451,7 +483,6 @@ const updateMessage = async (req, res) => {
   }
 };
 
-// GET /api/messages/unread-count (authenticated user)
 const getUnreadMessageCount = async (req, res) => {
   try {
     const unreadCount = await Message.countDocuments({
@@ -470,7 +501,6 @@ const getUnreadMessageCount = async (req, res) => {
   }
 };
 
-// PUT /api/messages/read/:conversationId or PATCH /api/messages/read/:conversationId (authenticated user)
 const markMessagesAsRead = async (req, res) => {
   try {
     const { conversationId } = req.params;
@@ -512,6 +542,11 @@ const markMessagesAsRead = async (req, res) => {
       }
     );
 
+    const io = req.app.get('io');
+    if (io) {
+      io.to(conversationId).emit('messages_read', { conversationId, readerId: req.user._id });
+    }
+
     return res.status(200).json({
       success: true,
       message: 'Messages marked as read.',
@@ -523,7 +558,6 @@ const markMessagesAsRead = async (req, res) => {
   }
 };
 
-// PUT /api/messages/single/:id/read or PUT /api/messages/:id/read or PUT /api/messages/messages/:messageId/read
 const markSingleMessageAsRead = async (req, res) => {
   try {
     const messageId = req.params.messageId || req.params.id;
@@ -550,6 +584,11 @@ const markSingleMessageAsRead = async (req, res) => {
 
     const formatted = safeMessage(populated, req.user._id);
 
+    const io = req.app.get('io');
+    if (io) {
+      io.to(message.conversation.toString()).emit('message_read', formatted);
+    }
+
     return res.status(200).json({
       success: true,
       message: 'Message marked as read.',
@@ -561,7 +600,6 @@ const markSingleMessageAsRead = async (req, res) => {
   }
 };
 
-// DELETE FOR ME: POST/PATCH /api/messages/:id/delete-for-me
 const deleteMessageForMe = async (req, res) => {
   try {
     const { id } = req.params;
@@ -590,7 +628,6 @@ const deleteMessageForMe = async (req, res) => {
   }
 };
 
-// DELETE FOR EVERYONE: POST/PATCH /api/messages/:id/delete-for-everyone
 const deleteMessageForEveryone = async (req, res) => {
   try {
     const { id } = req.params;
@@ -622,7 +659,6 @@ const deleteMessageForEveryone = async (req, res) => {
     message.attachments = [];
     await message.save();
 
-    // Sync conversation lastMessage if this was the last message
     await Conversation.findOneAndUpdate(
       { _id: message.conversation, lastMessageAt: message.createdAt },
       { $set: { lastMessage: 'This message was deleted' } }
@@ -636,6 +672,11 @@ const deleteMessageForEveryone = async (req, res) => {
 
     const formatted = safeMessage(populated, req.user._id);
 
+    const io = req.app.get('io');
+    if (io) {
+      io.to(message.conversation.toString()).emit('message_deleted', formatted);
+    }
+
     return res.status(200).json({
       success: true,
       message: 'Message deleted for everyone successfully.',
@@ -647,7 +688,6 @@ const deleteMessageForEveryone = async (req, res) => {
   }
 };
 
-// DELETE /api/messages/:id
 const deleteMessage = async (req, res) => {
   try {
     const { id } = req.params;

@@ -23,9 +23,9 @@ router.use(protect);
 router.get('/unread-count', getUnreadMessageCount);
 router.get('/unread', getUnreadMessageCount);
 
-// ── Send message (Supports text JSON + File uploads via multipart) ───────────
-router.post('/', upload.array('files', 5), sendMessage);
-router.post('/send', upload.array('files', 5), sendMessage);
+// ── Send message (Supports any file field name via upload.any()) ─────────────
+router.post('/', upload.any(), sendMessage);
+router.post('/send', upload.any(), sendMessage);
 
 // ── Read operations ─────────────────────────────────────────────────────────
 router.put('/messages/:messageId/read', markSingleMessageAsRead);

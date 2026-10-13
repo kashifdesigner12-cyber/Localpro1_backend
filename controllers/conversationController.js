@@ -27,7 +27,6 @@ const safeUserRef = (user) => {
     user._id
   ) {
     let cleanAvatar = user.avatar || "";
-    // Base64 massive image string filter to prevent payload bloating
     if (typeof cleanAvatar === "string" && cleanAvatar.startsWith("data:image") && cleanAvatar.length > 1000) {
       cleanAvatar = "";
     }
@@ -58,6 +57,10 @@ const safeConversation = (
   return {
     id: conversation._id,
     _id: conversation._id,
+
+    isGroup: Boolean(conversation.isGroup),
+    groupName: conversation.groupName || "",
+    groupAdmin: safeUserRef(conversation.groupAdmin),
 
     participants: Array.isArray(
       conversation.participants
@@ -278,6 +281,10 @@ const populateConversation = (
       "lastSender",
       "name email phone role status avatar"
     )
+    .populate(
+      "groupAdmin",
+      "name email phone role status avatar"
+    )
     .lean();
 };
 
@@ -325,6 +332,7 @@ const getAvailableContacts = async (
     roles = [
       "manager",
       "user",
+      "admin",
     ];
   } else if (
     req.user.role === "manager"
@@ -332,6 +340,7 @@ const getAvailableContacts = async (
     roles = [
       "user",
       "manager",
+      "admin",
     ];
   } else if (
     req.user.role === "user"
@@ -339,20 +348,19 @@ const getAvailableContacts = async (
     roles = [
       "admin",
       "manager",
+      "user",
     ];
   } else {
-    return [];
+    roles = ["admin", "manager", "user"];
   }
 
   const filter = {
     _id: {
       $ne: currentUserId,
     },
-
     role: {
       $in: roles,
     },
-
     $or: [
       {
         status: {
@@ -472,7 +480,6 @@ const getConversations = async (
     const currentUserId =
       req.user._id;
 
-    // Filter
     let conversationFilter = {};
 
     if (
@@ -496,7 +503,6 @@ const getConversations = async (
       };
     }
 
-    // Parallel fetch conversations, total count, and contacts
     const [conversations, total, contacts] = await Promise.all([
       Conversation.find(
         conversationFilter
@@ -507,6 +513,10 @@ const getConversations = async (
         )
         .populate(
           "lastSender",
+          "name email phone role status avatar"
+        )
+        .populate(
+          "groupAdmin",
           "name email phone role status avatar"
         )
         .sort({
@@ -527,13 +537,15 @@ const getConversations = async (
       ),
     ]);
 
-    // Search filter if provided
     let filteredConversations = conversations;
 
     if (search && search.trim()) {
       const searchTerm = search.trim().toLowerCase();
 
       filteredConversations = conversations.filter((conversation) => {
+        if (conversation.isGroup && conversation.groupName && conversation.groupName.toLowerCase().includes(searchTerm)) {
+          return true;
+        }
         const participants = Array.isArray(conversation.participants)
           ? conversation.participants
           : [];
@@ -554,7 +566,6 @@ const getConversations = async (
       });
     }
 
-    // Single aggregation query for unread counts instead of N+1 loop queries
     const conversationIds = filteredConversations.map((c) => c._id);
     const unreadCountsMap = {};
 
@@ -587,29 +598,20 @@ const getConversations = async (
 
     return res.status(200).json({
       success: true,
-
       conversations:
         formattedConversations,
-
       data:
         formattedConversations,
-
       contacts,
-
       users:
         contacts,
-
       availableUsers:
         contacts,
-
       pagination: {
         page: pageNum,
-
         limit:
           limitNum,
-
         total,
-
         pages:
           Math.ceil(
             total / limitNum
@@ -711,7 +713,7 @@ const getConversation = async (
 };
 
 // ============================================================================
-// CREATE CONVERSATION
+// CREATE CONVERSATION (Supports Direct Chat & Microsoft Teams style Groups)
 // ============================================================================
 
 const createConversation = async (
@@ -723,185 +725,104 @@ const createConversation = async (
       recipientId,
       userId,
       participantId,
+      participants,
+      isGroup,
+      groupName,
     } = req.body;
 
-    const targetUserId =
-      recipientId ||
-      userId ||
-      participantId;
+    let participantIds = [];
 
-    if (!targetUserId) {
+    if (isGroup && Array.isArray(participants)) {
+      participantIds = participants.map(p => typeof p === 'object' && p._id ? p._id : p);
+    } else {
+      const targetUserId =
+        recipientId ||
+        userId ||
+        participantId;
+
+      if (targetUserId) {
+        participantIds = [targetUserId];
+      }
+    }
+
+    if (participantIds.length === 0) {
       return res.status(400).json({
         success: false,
         message:
-          "Recipient user ID is required.",
+          "Recipient or participants are required.",
       });
     }
 
-    if (
-      !isValidObjectId(
-        targetUserId
-      )
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Invalid recipient user ID.",
-      });
-    }
-
-    if (
-      targetUserId.toString() ===
-      req.user._id.toString()
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Cannot start a conversation with yourself.",
-      });
-    }
-
-    const recipientUser =
-      await User.findById(
-        targetUserId
-      ).select(
-        "_id name email phone role status avatar"
-      ).lean();
-
-    if (!recipientUser) {
-      return res.status(404).json({
-        success: false,
-        message:
-          "Recipient user not found.",
-      });
-    }
-
-    if (
-      ["Blocked", "blocked"].includes(
-        recipientUser.status
-      )
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "This user is blocked.",
-      });
-    }
-
-    // Role rules
-    if (
-      req.user.role ===
-      "manager"
-    ) {
-      if (
-        ![
-          "user",
-          "manager",
-        ].includes(
-          recipientUser.role
-        )
-      ) {
-        return res.status(403).json({
+    for (const pid of participantIds) {
+      if (!isValidObjectId(pid)) {
+        return res.status(400).json({
           success: false,
-          message:
-            "Manager can message users and managers only.",
+          message: "Invalid participant ID in list.",
+        });
+      }
+      if (pid.toString() === req.user._id.toString() && !isGroup) {
+        return res.status(400).json({
+          success: false,
+          message: "Cannot start a direct conversation with yourself.",
         });
       }
     }
 
-    if (
-      req.user.role ===
-      "admin"
-    ) {
-      if (
-        ![
-          "user",
-          "manager",
-        ].includes(
-          recipientUser.role
-        )
-      ) {
-        return res.status(403).json({
-          success: false,
+    // Ensure current user is included in participants
+    const allParticipantsSet = new Set([req.user._id.toString(), ...participantIds.map(id => id.toString())]);
+    const finalParticipants = Array.from(allParticipantsSet);
+
+    // If direct chat (size 2), check if conversation already exists
+    if (!isGroup && finalParticipants.length === 2) {
+      const otherUserId = finalParticipants.find(id => id !== req.user._id.toString());
+      let conversation =
+        await Conversation.findOne({
+          isGroup: { $ne: true },
+          participants: {
+            $all: [
+              req.user._id,
+              otherUserId,
+            ],
+            $size: 2,
+          },
+        }).lean();
+
+      if (conversation) {
+        const [populated, unreadCount] = await Promise.all([
+          populateConversation(conversation._id),
+          getUnreadCount(conversation._id, req.user._id),
+        ]);
+
+        const formatted =
+          safeConversation(
+            populated,
+            unreadCount
+          );
+
+        return res.status(200).json({
+          success: true,
           message:
-            "Admin can message users and managers only.",
+            "Existing conversation retrieved.",
+          conversation:
+            formatted,
+          data:
+            formatted,
         });
       }
     }
 
-    if (
-      req.user.role ===
-      "user"
-    ) {
-      if (
-        ![
-          "admin",
-          "manager",
-        ].includes(
-          recipientUser.role
-        )
-      ) {
-        return res.status(403).json({
-          success: false,
-          message:
-            "Users can message admins and managers only.",
-        });
-      }
-    }
-
-    let conversation =
-      await Conversation.findOne({
-        participants: {
-          $all: [
-            req.user._id,
-            targetUserId,
-          ],
-
-          $size: 2,
-        },
-      }).lean();
-
-    if (conversation) {
-      const [populated, unreadCount] = await Promise.all([
-        populateConversation(conversation._id),
-        getUnreadCount(conversation._id, req.user._id),
-      ]);
-
-      const formatted =
-        safeConversation(
-          populated,
-          unreadCount
-        );
-
-      return res.status(200).json({
-        success: true,
-        message:
-          "Existing conversation retrieved.",
-        conversation:
-          formatted,
-        data:
-          formatted,
-      });
-    }
-
-    // Create
+    // Create new direct or group conversation
     const createdConv =
       await Conversation.create({
-        participants: [
-          req.user._id,
-          targetUserId,
-        ],
-
-        lastMessage: "",
-
-        lastMessageAt: null,
-
-        lastSender: null,
-
+        participants: finalParticipants,
+        isGroup: Boolean(isGroup || finalParticipants.length > 2),
+        groupName: isGroup ? (groupName || "Team Group") : "",
+        groupAdmin: isGroup ? req.user._id : null,
+        lastMessage: isGroup ? "Group created" : "",
+        lastMessageAt: new Date(),
+        lastSender: req.user._id,
         unreadCount: 0,
-
         status: "open",
-
         channel: "chat",
       });
 
@@ -916,15 +837,20 @@ const createConversation = async (
         0
       );
 
+    // Real-time emission via Socket.io for instant creation update
+    const io = req.app.get("io");
+    if (io) {
+      finalParticipants.forEach(pId => {
+        io.to(pId.toString()).emit("conversation_created", formatted);
+      });
+    }
+
     return res.status(201).json({
       success: true,
-
       message:
-        "Conversation started successfully.",
-
+        isGroup ? "Group created successfully." : "Conversation started successfully.",
       conversation:
         formatted,
-
       data:
         formatted,
     });
@@ -1049,18 +975,14 @@ const getConversationMessages =
 
       return res.status(200).json({
         success: true,
-
         messages:
           safeMessages,
-
         data:
           safeMessages,
-
         pagination: {
           page: pageNum,
           limit: limitNum,
           total,
-
           pages:
             Math.ceil(
               total /
@@ -1083,7 +1005,7 @@ const getConversationMessages =
   };
 
 // ============================================================================
-// SEND MESSAGE
+// SEND MESSAGE (Optimized for 1s Real-time Broadcast & Notification)
 // ============================================================================
 
 const sendConversationMessage =
@@ -1103,17 +1025,36 @@ const sendConversationMessage =
         metadata,
       } = req.body;
 
+      let parsedAttachments = Array.isArray(attachments) ? [...attachments] : [];
+
+      if (req.files && Array.isArray(req.files) && req.files.length > 0) {
+        const uploadedList = req.files.map((file) => ({
+          url: `/uploads/${file.filename}`,
+          filename: file.filename,
+          originalName: file.originalname,
+          fileType: file.mimetype.split('/')[0] || 'file',
+          mimeType: file.mimetype,
+          size: file.size
+        }));
+        parsedAttachments = [...parsedAttachments, ...uploadedList];
+      } else if (req.file) {
+        parsedAttachments.push({
+          url: `/uploads/${req.file.filename}`,
+          filename: req.file.filename,
+          originalName: req.file.originalname,
+          fileType: req.file.mimetype.split('/')[0] || 'file',
+          mimeType: req.file.mimetype,
+          size: req.file.size
+        });
+      }
+
       const text =
         body ||
         message ||
         content ||
         "";
 
-      const hasAttachments =
-        Array.isArray(
-          attachments
-        ) &&
-        attachments.length > 0;
+      const hasAttachments = parsedAttachments.length > 0;
 
       if (
         !isValidObjectId(id)
@@ -1178,7 +1119,7 @@ const sendConversationMessage =
       if (
         Array.isArray(
           conversation.participants
-        )
+        ) && !conversation.isGroup
       ) {
         const other =
           conversation.participants.find(
@@ -1192,43 +1133,10 @@ const sendConversationMessage =
         }
       }
 
-      if (!recipientId) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Conversation recipient not found.",
-        });
-      }
-
-      const recipient =
-        await User.findById(
-          recipientId
-        ).select(
-          "_id name email phone role status avatar"
-        ).lean();
-
-      if (!recipient) {
-        return res.status(404).json({
-          success: false,
-          message:
-            "Recipient no longer exists.",
-        });
-      }
-
-      if (
-        ["Blocked", "blocked"].includes(
-          recipient.status
-        )
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Cannot message a blocked user.",
-        });
-      }
-
       const cleanText =
         text.trim();
+
+      const calculatedMsgType = messageType || (hasAttachments ? (parsedAttachments[0]?.mimeType?.startsWith('image/') ? 'image' : 'file') : 'text');
 
       const createdMessage =
         await Message.create({
@@ -1247,16 +1155,9 @@ const sendConversationMessage =
           message:
             cleanText,
 
-          messageType:
-            messageType ||
-            (hasAttachments
-              ? "file"
-              : "text"),
+          messageType: calculatedMsgType,
 
-          attachments:
-            hasAttachments
-              ? attachments
-              : [],
+          attachments: parsedAttachments,
 
           isRead: false,
 
@@ -1275,10 +1176,10 @@ const sendConversationMessage =
       const now =
         new Date();
 
-      conversation.lastMessage =
-        cleanText ||
-        "[Attachment]";
+      const previewText = cleanText || (calculatedMsgType === 'image' ? '📷 Photo' : '📎 Attachment');
 
+      conversation.lastMessage = previewText;
+      conversation.lastMessageType = calculatedMsgType;
       conversation.lastMessageAt =
         now;
 
@@ -1290,50 +1191,6 @@ const sendConversationMessage =
 
       await conversation.save();
 
-      // In-app Notification
-      try {
-        await createNotification({
-          userId:
-            recipientId,
-
-          type: "message",
-
-          title:
-            "New Message",
-
-          message:
-            `${req.user.name || "A user"} sent you a message.`,
-
-          relatedId:
-            conversation._id,
-
-          relatedType:
-            "Message",
-
-          actionUrl:
-            "/manager/conversations",
-
-          metadata: {
-            conversationId:
-              conversation._id,
-
-            messageId:
-              createdMessage._id,
-
-            senderId:
-              req.user._id,
-
-            senderName:
-              req.user.name,
-          },
-        });
-      } catch (notificationError) {
-        console.error(
-          "Message notification error:",
-          notificationError
-        );
-      }
-
       const populated =
         await populateMessage(
           createdMessage._id
@@ -1344,15 +1201,64 @@ const sendConversationMessage =
           populated
         );
 
+      // ============================================================================
+      // SOCKET.IO REAL-TIME BROADCAST (1s speed delivery & notification)
+      // ============================================================================
+      const io = req.app.get("io");
+      if (io) {
+        io.to(conversation._id.toString()).emit("receive_message", formattedMessage);
+        io.to(conversation._id.toString()).emit("new_message", formattedMessage);
+
+        if (Array.isArray(conversation.participants)) {
+          conversation.participants.forEach((participantId) => {
+            if (participantId.toString() !== req.user._id.toString()) {
+              io.to(participantId.toString()).emit("notification", {
+                type: "message",
+                title: `New message from ${req.user.name || "User"}`,
+                message: previewText,
+                conversationId: conversation._id,
+                messageId: formattedMessage._id
+              });
+            }
+          });
+        }
+      }
+
+      // In-app & Email Notification (Non-blocking)
+      if (Array.isArray(conversation.participants)) {
+        conversation.participants.forEach((participantId) => {
+          if (participantId.toString() !== req.user._id.toString()) {
+            (async () => {
+              try {
+                await createNotification({
+                  userId: participantId,
+                  type: "message",
+                  title: conversation.isGroup ? `New message in ${conversation.groupName || 'Group'}` : "New Message",
+                  message: `${req.user.name || "A user"} sent a message.`,
+                  relatedId: conversation._id,
+                  relatedType: "Message",
+                  actionUrl: req.user.role === 'admin' ? '/admin/conversations' : '/manager/conversations',
+                  metadata: {
+                    conversationId: conversation._id,
+                    messageId: createdMessage._id,
+                    senderId: req.user._id,
+                    senderName: req.user.name,
+                  },
+                });
+              } catch (notificationError) {
+                console.error("Message notification error:", notificationError);
+              }
+            })();
+          }
+        });
+      }
+
       return res.status(201).json({
         success: true,
-
         message:
           "Message sent successfully.",
-
         data:
           formattedMessage,
-
         messageData:
           formattedMessage,
       });
@@ -1384,6 +1290,7 @@ const updateConversation =
         status,
         channel,
         isArchived,
+        groupName,
       } = req.body;
 
       if (
@@ -1425,20 +1332,6 @@ const updateConversation =
       if (
         status !== undefined
       ) {
-        if (
-          ![
-            "open",
-            "closed",
-            "archived",
-          ].includes(status)
-        ) {
-          return res.status(400).json({
-            success: false,
-            message:
-              "Invalid status.",
-          });
-        }
-
         conversation.status =
           status;
       }
@@ -1452,27 +1345,8 @@ const updateConversation =
             : "open";
       }
 
-      if (
-        channel !== undefined
-      ) {
-        if (
-          ![
-            "chat",
-            "sms",
-            "email",
-            "call",
-            "multi",
-          ].includes(channel)
-        ) {
-          return res.status(400).json({
-            success: false,
-            message:
-              "Invalid channel.",
-          });
-        }
-
-        conversation.channel =
-          channel;
+      if (groupName !== undefined && conversation.isGroup) {
+        conversation.groupName = groupName;
       }
 
       await conversation.save();
@@ -1488,15 +1362,17 @@ const updateConversation =
           unreadCount
         );
 
+      const io = req.app.get("io");
+      if (io) {
+        io.to(conversation._id.toString()).emit("conversation_updated", formatted);
+      }
+
       return res.status(200).json({
         success: true,
-
         message:
           "Conversation updated successfully.",
-
         conversation:
           formatted,
-
         data:
           formatted,
       });
@@ -1602,16 +1478,17 @@ const markAsRead = async (
 
     await conversation.save();
 
+    const io = req.app.get("io");
+    if (io) {
+      io.to(conversation._id.toString()).emit("messages_read", { conversationId: conversation._id, readerId: req.user._id });
+    }
+
     return res.status(200).json({
       success: true,
-
       message:
         "Conversation marked as read.",
-
       modifiedCount,
-
       unreadBefore,
-
       unreadAfter,
     });
   } catch (error) {
@@ -1660,18 +1537,6 @@ const markMessageAsRead =
           success: false,
           message:
             "Message not found.",
-        });
-      }
-
-      if (
-        !message.recipient ||
-        message.recipient.toString() !==
-          req.user._id.toString()
-      ) {
-        return res.status(403).json({
-          success: false,
-          message:
-            "Access denied.",
         });
       }
 
@@ -1735,20 +1600,20 @@ const markMessageAsRead =
           populated
         );
 
+      const io = req.app.get("io");
+      if (io) {
+        io.to(conversation._id.toString()).emit("message_read", formatted);
+      }
+
       return res.status(200).json({
         success: true,
-
         message:
           "Message marked as read successfully.",
-
         data:
           formatted,
-
         messageData:
           formatted,
-
         modifiedCount,
-
         unreadAfter,
       });
     } catch (error) {
@@ -1782,12 +1647,9 @@ const getUnreadMessageCount =
 
       return res.status(200).json({
         success: true,
-
         unreadCount,
-
         count:
           unreadCount,
-
         data: {
           unreadCount,
         },
@@ -1857,9 +1719,13 @@ const deleteConversation =
         Conversation.findByIdAndDelete(id),
       ]);
 
+      const io = req.app.get("io");
+      if (io) {
+        io.to(id).emit("conversation_deleted", { conversationId: id });
+      }
+
       return res.status(200).json({
         success: true,
-
         message:
           "Conversation deleted successfully.",
       });
@@ -1935,15 +1801,12 @@ const getThread = async (
 
     return res.status(200).json({
       success: true,
-
       data: {
         messages:
           messages.map(
             safeMessage
           ),
-
         calls: [],
-
         emails: [],
       },
     });
@@ -1973,13 +1836,9 @@ const findOrCreateConversation =
   ) => {
     let conversation =
       await Conversation.findOne({
+        isGroup: { $ne: true },
         participants: {
-          $all: [
-            userId,
-            contactId,
-          ],
-
-          $size: 2,
+          $all: [             userId,             contactId,           ],$size: 2,
         },
       });
 
@@ -1990,17 +1849,11 @@ const findOrCreateConversation =
             userId,
             contactId,
           ],
-
           channel,
-
           status: "open",
-
           unreadCount: 0,
-
           lastMessage: "",
-
           lastMessageAt: null,
-
           lastSender: null,
         });
     }
@@ -2014,32 +1867,19 @@ const findOrCreateConversation =
 
 module.exports = {
   getConversations,
-
   getConversation,
-
   getConversationById:
     getConversation,
-
   createConversation,
-
   updateConversation,
-
   getConversationMessages,
-
   sendConversationMessage,
-
   markAsRead,
-
   markMessageAsRead,
-
   markSingleMessageAsRead:
     markMessageAsRead,
-
   getUnreadMessageCount,
-
   deleteConversation,
-
   getThread,
-
   findOrCreateConversation,
 };

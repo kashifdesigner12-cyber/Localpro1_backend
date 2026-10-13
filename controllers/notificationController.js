@@ -48,36 +48,18 @@ const safeNotification = (notification) => {
 
   return {
     id: notification._id,
-
     userId: notification.user,
-
     type: notification.type,
-
     title: notification.title,
-
     message: notification.message,
-
     isRead: notification.isRead,
-
     readAt: notification.readAt || null,
-
-    relatedId:
-      notification.relatedId || null,
-
-    relatedType:
-      notification.relatedType || null,
-
-    actionUrl:
-      notification.actionUrl || '',
-
-    metadata:
-      notification.metadata || {},
-
-    createdAt:
-      notification.createdAt,
-
-    updatedAt:
-      notification.updatedAt
+    relatedId: notification.relatedId || null,
+    relatedType: notification.relatedType || null,
+    actionUrl: notification.actionUrl || '',
+    metadata: notification.metadata || {},
+    createdAt: notification.createdAt,
+    updatedAt: notification.updatedAt
   };
 };
 
@@ -109,31 +91,24 @@ const createNotification = async (
           paramsOrUserId.userId ||
           paramsOrUserId.user ||
           null,
-
         type:
           paramsOrUserId.type ||
           'system',
-
         title:
           paramsOrUserId.title ||
           '',
-
         message:
           paramsOrUserId.message ||
           '',
-
         relatedId:
           paramsOrUserId.relatedId ||
           null,
-
         relatedType:
           paramsOrUserId.relatedType ||
           null,
-
         actionUrl:
           paramsOrUserId.actionUrl ||
           '',
-
         metadata:
           paramsOrUserId.metadata ||
           {}
@@ -145,83 +120,33 @@ const createNotification = async (
           paramsOrUserId._id
             ? paramsOrUserId._id
             : paramsOrUserId,
-
-        type:
-          argType ||
-          'system',
-
-        title:
-          argTitle ||
-          '',
-
-        message:
-          argMessage ||
-          '',
-
-        relatedId:
-          argRelatedId ||
-          null,
-
-        relatedType:
-          argRelatedType ||
-          null,
-
-        actionUrl:
-          argActionUrl ||
-          '',
-
-        metadata:
-          argMetadata ||
-          {}
+        type: argType || 'system',
+        title: argTitle || '',
+        message: argMessage || '',
+        relatedId: argRelatedId || null,
+        relatedType: argRelatedType || null,
+        actionUrl: argActionUrl || '',
+        metadata: argMetadata || {}
       };
     }
 
-    if (!payload.user) {
-      console.error(
-        'createNotification: user is required'
-      );
+    if (!payload.user || !isValidObjectId(payload.user)) {
+      console.error('createNotification: invalid or missing user ID');
       return null;
     }
 
-    if (
-      !isValidObjectId(
-        payload.user
-      )
-    ) {
-      console.error(
-        'createNotification: invalid user ID'
-      );
+    if (!VALID_TYPES.includes(payload.type)) {
+      console.error(`createNotification: Invalid notification type "${payload.type}"`);
       return null;
     }
 
-    if (
-      !VALID_TYPES.includes(
-        payload.type
-      )
-    ) {
-      console.error(
-        `createNotification: Invalid notification type "${payload.type}"`
-      );
+    if (!payload.title || !String(payload.title).trim()) {
+      console.error('createNotification: title is required');
       return null;
     }
 
-    if (
-      !payload.title ||
-      !String(payload.title).trim()
-    ) {
-      console.error(
-        'createNotification: title is required'
-      );
-      return null;
-    }
-
-    if (
-      !payload.message ||
-      !String(payload.message).trim()
-    ) {
-      console.error(
-        'createNotification: message is required'
-      );
+    if (!payload.message || !String(payload.message).trim()) {
+      console.error('createNotification: message is required');
       return null;
     }
 
@@ -239,36 +164,15 @@ const createNotification = async (
 
     const notification =
       await Notification.create({
-        user:
-          payload.user,
-
-        type:
-          payload.type,
-
-        title:
-          String(
-            payload.title
-          ).trim(),
-
-        message:
-          String(
-            payload.message
-          ).trim(),
-
-        isRead:
-          false,
-
-        relatedId:
-          payload.relatedId,
-
-        relatedType:
-          payload.relatedType,
-
-        actionUrl:
-          payload.actionUrl,
-
-        metadata:
-          payload.metadata
+        user: payload.user,
+        type: payload.type,
+        title: String(payload.title).trim(),
+        message: String(payload.message).trim(),
+        isRead: false,
+        relatedId: payload.relatedId,
+        relatedType: payload.relatedType,
+        actionUrl: payload.actionUrl,
+        metadata: payload.metadata
       });
 
     return notification;
@@ -301,21 +205,12 @@ const createAttendanceNotification = async ({
 
     return await createNotification({
       userId,
-
       type: 'attendance',
-
       title,
-
       message,
-
-      relatedId:
-        attendanceId,
-
-      relatedType:
-        'Attendance',
-
+      relatedId: attendanceId,
+      relatedType: 'Attendance',
       actionUrl,
-
       metadata
     });
   } catch (error) {
@@ -364,36 +259,17 @@ const notifyAttendanceMarked = async ({
     }
 
     return await createNotification({
-      userId:
-        recipientId,
-
-      type:
-        'attendance',
-
-      title:
-        'Attendance Marked',
-
-      message:
-        `${userName} has marked attendance as ${formattedStatus}.`,
-
-      relatedId:
-        attendanceId,
-
-      relatedType:
-        'Attendance',
-
-      actionUrl:
-        '/admin/attendance',
-
+      userId: recipientId,
+      type: 'attendance',
+      title: 'Attendance Marked',
+      message: `${userName} has marked attendance as ${formattedStatus}.`,
+      relatedId: attendanceId,
+      relatedType: 'Attendance',
+      actionUrl: '/admin/attendance',
       metadata: {
-        attendanceUserId:
-          userId || null,
-
+        attendanceUserId: userId || null,
         userName,
-
-        status:
-          formattedStatus,
-
+        status: formattedStatus,
         checkInTime
       }
     });
@@ -459,8 +335,7 @@ const getNotifications = async (
         });
       }
 
-      filter.type =
-        type;
+      filter.type = type;
     }
 
     if (
@@ -502,7 +377,6 @@ const getNotifications = async (
       (pageNum - 1) *
       limitNum;
 
-    // Optimized: Run find with lean and parallelize unread count
     const [
       notifications,
       total,
@@ -536,24 +410,15 @@ const getNotifications = async (
 
     return res.status(200).json({
       success: true,
-
       notifications:
         formattedNotifications,
-
       data:
         formattedNotifications,
-
       unreadCount,
-
       pagination: {
-        page:
-          pageNum,
-
-        limit:
-          limitNum,
-
+        page: pageNum,
+        limit: limitNum,
         total,
-
         pages:
           Math.ceil(
             total /
@@ -587,16 +452,12 @@ const getUnreadCount = async (
   try {
     const unreadCount =
       await Notification.countDocuments({
-        user:
-          req.user._id,
-
-        isRead:
-          false
+        user: req.user._id,
+        isRead: false
       });
 
     return res.status(200).json({
       success: true,
-
       unreadCount
     });
   } catch (error) {
@@ -664,7 +525,6 @@ const getNotificationById =
 
       return res.status(200).json({
         success: true,
-
         notification:
           safeNotification(
             notification
@@ -723,7 +583,6 @@ const markAsRead = async (
       ).lean();
 
     if (!notification) {
-      // Check if it exists for another user or doesn't exist
       const exists = await Notification.exists({ _id: id });
       if (!exists) {
         return res.status(404).json({
@@ -741,10 +600,8 @@ const markAsRead = async (
 
     return res.status(200).json({
       success: true,
-
       message:
         'Notification marked as read.',
-
       notification:
         safeNotification(
           notification
@@ -773,25 +630,18 @@ const markAllAsRead = async (
   res
 ) => {
   try {
-    const now =
-      new Date();
+    const now = new Date();
 
     const result =
       await Notification.updateMany(
         {
-          user:
-            req.user._id,
-
-          isRead:
-            false
+          user: req.user._id,
+          isRead: false
         },
         {
           $set: {
-            isRead:
-              true,
-
-            readAt:
-              now
+            isRead: true,
+            readAt: now
           }
         }
       );
@@ -807,10 +657,8 @@ const markAllAsRead = async (
 
     return res.status(200).json({
       success: true,
-
       message:
         'All notifications marked as read.',
-
       modifiedCount
     });
   } catch (error) {
@@ -882,7 +730,6 @@ const deleteNotification =
 
       return res.status(200).json({
         success: true,
-
         message:
           'Notification deleted successfully.'
       });
@@ -913,19 +760,14 @@ const deleteReadNotifications =
     try {
       const result =
         await Notification.deleteMany({
-          user:
-            req.user._id,
-
-          isRead:
-            true
+          user: req.user._id,
+          isRead: true
         });
 
       return res.status(200).json({
         success: true,
-
         message:
           'Read notifications deleted successfully.',
-
         deletedCount:
           result.deletedCount
       });
@@ -949,22 +791,13 @@ const deleteReadNotifications =
 
 module.exports = {
   createNotification,
-
   createAttendanceNotification,
-
   notifyAttendanceMarked,
-
   getNotifications,
-
   getUnreadCount,
-
   getNotificationById,
-
   markAsRead,
-
   markAllAsRead,
-
   deleteNotification,
-
   deleteReadNotifications
 };

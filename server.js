@@ -1,16 +1,15 @@
-// =====================================================
-// DNS SOLUTION
-// =====================================================
-
-const dns = require("dns");
-
-dns.setServers(["1.1.1.1", "8.8.8.8"]);
+"use strict";
 
 // =====================================================
 // ENVIRONMENT
 // =====================================================
 
 require("dotenv").config();
+
+const dns = require("dns");
+
+// DNS fallback
+dns.setServers(["1.1.1.1", "8.8.8.8"]);
 
 // =====================================================
 // IMPORTS
@@ -23,12 +22,9 @@ const express = require("express");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const multer = require("multer");
+const { Server } = require("socket.io");
 
 const connectDB = require("./config/db");
-
-// =====================================================
-// ATTENDANCE EMAIL SCHEDULER
-// =====================================================
 
 const {
   startAttendanceEmailScheduler,
@@ -37,11 +33,129 @@ const {
 } = require("./services/attendanceEmailScheduler");
 
 // =====================================================
-// APP SETUP
+// APP AND HTTP SERVER
 // =====================================================
 
 const app = express();
 const server = http.createServer(app);
+
+const PORT = process.env.PORT || 5000;
+
+const normalizeOrigin = (origin) =>
+  origin ? origin.replace(/\/+$/, "") : origin;
+
+const allowedOrigins = new Set([
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  "http://localhost:5173",
+  "https://localpro1.net",
+]);
+
+if (process.env.FRONTEND_URL) {
+  for (const origin of process.env.FRONTEND_URL.split(",")) {
+    const normalized = normalizeOrigin(origin.trim());
+    if (normalized) allowedOrigins.add(normalized);
+  }
+}
+
+const corsOrigin = (origin, callback) => {
+  if (!origin || allowedOrigins.has(normalizeOrigin(origin))) {
+    return callback(null, true);
+  }
+
+  console.warn(`[CORS] Blocked origin: ${origin}`);
+  return callback(new Error("Not allowed by CORS"));
+};
+
+const corsOptions = {
+  origin: corsOrigin,
+  credentials: true,
+  methods: [
+    "GET",
+    "POST",
+    "PUT",
+    "PATCH",
+    "DELETE",
+    "OPTIONS",
+  ],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "Accept",
+    "X-Requested-With",
+  ],
+  exposedHeaders: ["Content-Disposition"],
+  maxAge: 600,
+};
+
+// =====================================================
+// SOCKET.IO — REAL-TIME FOUNDATION (OPTIMIZED FOR 1S LATENCY)
+// =====================================================
+
+const io = new Server(server, {
+  cors: {
+    origin: corsOrigin,
+    credentials: true,
+    methods: ["GET", "POST"],
+  },
+  transports: ["websocket", "polling"],
+  pingInterval: 10000,
+  pingTimeout: 5000,
+  connectTimeout: 10000,
+  maxHttpBufferSize: 5e6, // Increased buffer size for fast file transfer (5MB)
+});
+
+// Make Socket.IO available to controllers and routes.
+app.set("io", io);
+
+// Connected online users tracking map for blue tick / active status
+const activeUsers = new Map();
+
+io.on("connection", (socket) => {
+  console.log(`[Socket.IO] Connected: ${socket.id}`);
+
+  // User join personal room or online status register
+  socket.on("user_join", (userId) => {
+    if (userId) {
+      activeUsers.set(userId, socket.id);
+      socket.join(userId);
+      // Broadcast online status to all users/admin
+      io.emit("update_user_status", { userId, status: "online" });
+      console.log(`[Socket.IO] User online & joined room: ${userId}`);
+    }
+  });
+
+  // Join Conversation / Group Room
+  socket.on("join_room", (roomId) => {
+    if (roomId) {
+      socket.join(roomId);
+      console.log(`[Socket.IO] Socket ${socket.id} joined room: ${roomId}`);
+    }
+  });
+
+  // Leave Conversation / Group Room
+  socket.on("leave_room", (roomId) => {
+    if (roomId) {
+      socket.leave(roomId);
+    }
+  });
+
+  socket.on("disconnect", (reason) => {
+    for (let [userId, sId] of activeUsers.entries()) {
+      if (sId === socket.id) {
+        activeUsers.delete(userId);
+        io.emit("update_user_status", { userId, status: "offline" });
+        console.log(`[Socket.IO] User offline: ${userId}`);
+        break;
+      }
+    }
+    console.log(`[Socket.IO] Disconnected: ${socket.id} (${reason})`);
+  });
+
+  socket.on("error", (error) => {
+    console.error("[Socket.IO] Socket error:", error.message);
+  });
+});
 
 // =====================================================
 // ROUTER LOADER
@@ -50,12 +164,10 @@ const server = http.createServer(app);
 const loadRouter = (routePath) => {
   const routeModule = require(routePath);
 
-  // Direct Express Router
   if (typeof routeModule === "function") {
     return routeModule;
   }
 
-  // { router }
   if (
     routeModule &&
     typeof routeModule.router === "function"
@@ -63,7 +175,6 @@ const loadRouter = (routePath) => {
     return routeModule.router;
   }
 
-  // { default: router }
   if (
     routeModule &&
     typeof routeModule.default === "function"
@@ -71,10 +182,7 @@ const loadRouter = (routePath) => {
     return routeModule.default;
   }
 
-  console.error(
-    `Invalid router export from ${routePath}:`,
-    routeModule
-  );
+  console.error(`Invalid router export from ${routePath}`);
 
   throw new TypeError(
     `Route file ${routePath} does not export an Express router.`
@@ -87,90 +195,15 @@ const loadRouter = (routePath) => {
 
 const uploadsDir = path.join(__dirname, "uploads");
 
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, {
-    recursive: true,
-  });
-}
+fs.mkdirSync(uploadsDir, { recursive: true });
 
 // =====================================================
-// CORS
+// EXPRESS MIDDLEWARE
 // =====================================================
 
-const allowedOrigins = [
-  "http://localhost:3000",
-  "http://127.0.0.1:3000",
-  "https://localpro1.net",
-];
-
-if (process.env.FRONTEND_URL) {
-  allowedOrigins.push(
-    process.env.FRONTEND_URL.replace(/\/$/, "")
-  );
-}
-
-app.use(
-  cors({
-    origin: function (origin, callback) {
-      // Allow requests without an Origin header
-      // such as Postman and server-to-server requests.
-      if (!origin) {
-        return callback(null, true);
-      }
-
-      const normalizedOrigin = origin.replace(/\/$/, "");
-
-      if (allowedOrigins.includes(normalizedOrigin)) {
-        return callback(null, true);
-      }
-
-      console.error(
-        `CORS blocked origin: ${origin}`
-      );
-
-      return callback(
-        new Error("Not allowed by CORS")
-      );
-    },
-
-    credentials: true,
-
-    methods: [
-      "GET",
-      "POST",
-      "PUT",
-      "PATCH",
-      "DELETE",
-      "OPTIONS",
-    ],
-
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "Accept",
-      "X-Requested-With",
-    ],
-
-    exposedHeaders: [
-      "Content-Disposition",
-    ],
-
-    // Cache preflight OPTIONS requests
-    // for 10 minutes.
-    maxAge: 600,
-  })
-);
-
-// =====================================================
-// COOKIE PARSER
-// =====================================================
+app.use(cors(corsOptions));
 
 app.use(cookieParser());
-
-// =====================================================
-// BODY PARSERS
-// Increased limit to 50mb for base64 profile pictures
-// =====================================================
 
 app.use(
   express.json({
@@ -186,48 +219,46 @@ app.use(
 );
 
 // =====================================================
-// STATIC UPLOADS
+// STATIC FILES
 // =====================================================
 
 app.use(
   "/uploads",
-  express.static(uploadsDir)
+  express.static(uploadsDir, {
+    index: false,
+    dotfiles: "deny",
+    maxAge: process.env.NODE_ENV === "production"
+      ? "1d"
+      : 0,
+    setHeaders(res) {
+      res.setHeader("X-Content-Type-Options", "nosniff");
+    },
+  })
 );
 
 // =====================================================
-// HEALTH CHECK
+// HEALTH CHECKS
 // =====================================================
 
-// Existing API health endpoint
 app.get("/api/health", (req, res) => {
-  return res.status(200).json({
+  res.status(200).json({
     success: true,
     message: "API is working",
-    timestamp: new Date(),
+    realtime: "Socket.IO initialized",
+    timestamp: new Date().toISOString(),
   });
 });
 
-// Simple health endpoint
-// Useful for direct browser/server monitoring.
 app.get("/health", (req, res) => {
-  return res.status(200).json({
+  res.status(200).json({
     success: true,
     message: "Backend is running",
-    timestamp: new Date(),
+    timestamp: new Date().toISOString(),
   });
 });
 
 // =====================================================
-// MANUAL ATTENDANCE EMAIL SENDER
-// =====================================================
-//
-// Permanent manual endpoint.
-// Sends attendance reminder emails immediately
-// to all active users who have an email address.
-//
-// Method:
-// POST /api/send-attendance-reminders
-//
+// ATTENDANCE EMAILS
 // =====================================================
 
 app.post(
@@ -235,14 +266,13 @@ app.post(
   async (req, res) => {
     try {
       console.log(
-        "[Attendance Email] Manual sending started..."
+        "[Attendance Email] Manual sending started."
       );
 
-      const result =
-        await sendDailyAttendanceEmails();
+      const result = await sendDailyAttendanceEmails();
 
       console.log(
-        "[Attendance Email] Manual sending completed:",
+        "[Attendance Email] Completed:",
         result
       );
 
@@ -254,7 +284,7 @@ app.post(
       });
     } catch (error) {
       console.error(
-        "[Attendance Email] Manual sending error:",
+        "[Attendance Email] Error:",
         error
       );
 
@@ -262,7 +292,6 @@ app.post(
         success: false,
         message:
           "Failed to send attendance reminder emails.",
-        error: error.message,
       });
     }
   }
@@ -270,144 +299,51 @@ app.post(
 
 // =====================================================
 // API ROUTES
+// Existing routes preserved
 // =====================================================
 
-app.use(
-  "/api/auth",
-  loadRouter("./routes/authRoutes")
-);
+const routes = [
+  ["/api/auth", "./routes/authRoutes"],
+  ["/api/users", "./routes/userRoutes"],
+  ["/api/signup-requests", "./routes/signupRequestRoutes"],
+  ["/api/leave-requests", "./routes/leaveRequestRoutes"],
+  ["/api/notifications", "./routes/notificationRoutes"],
+  ["/api/tasks", "./routes/taskRoutes"],
+  ["/api/dashboard", "./routes/dashboardRoutes"],
 
-app.use(
-  "/api/users",
-  loadRouter("./routes/userRoutes")
-);
+  // Messaging
+  ["/api/conversations", "./routes/conversationRoutes"],
+  ["/api/messages", "./routes/messageRoutes"],
 
-app.use(
-  "/api/signup-requests",
-  loadRouter("./routes/signupRequestRoutes")
-);
+  ["/api/attendance", "./routes/attendanceRoutes"],
+  ["/api/events", "./routes/eventRoutes"],
+  ["/api/calendar", "./routes/calendarRoutes"],
+  ["/api/appointments", "./routes/eventRoutes"],
+  ["/api/calls", "./routes/callRoutes"],
+  ["/api/contacts", "./routes/contactRoutes"],
+  ["/api/leads", "./routes/contactRoutes"],
+  ["/api/emails", "./routes/emailRoutes"],
+  ["/api/media", "./routes/mediaRoutes"],
+  ["/api/files", "./routes/mediaRoutes"],
+  ["/api/campaigns", "./routes/campaignRoutes"],
+  ["/api/marketing", "./routes/campaignRoutes"],
+  ["/api/ai-agents", "./routes/agentRoutes"],
+  ["/api/agents", "./routes/agentRoutes"],
+  ["/api/analytics", "./routes/analyticsRoutes"],
+  ["/api/settings", "./routes/settingsRoutes"],
+  ["/api/activity", "./routes/activityRoutes"],
+];
 
-app.use(
-  "/api/leave-requests",
-  loadRouter("./routes/leaveRequestRoutes")
-);
-
-app.use(
-  "/api/notifications",
-  loadRouter("./routes/notificationRoutes")
-);
-
-app.use(
-  "/api/tasks",
-  loadRouter("./routes/taskRoutes")
-);
-
-app.use(
-  "/api/dashboard",
-  loadRouter("./routes/dashboardRoutes")
-);
-
-app.use(
-  "/api/conversations",
-  loadRouter("./routes/conversationRoutes")
-);
-
-app.use(
-  "/api/messages",
-  loadRouter("./routes/messageRoutes")
-);
-
-app.use(
-  "/api/attendance",
-  loadRouter("./routes/attendanceRoutes")
-);
-
-app.use(
-  "/api/events",
-  loadRouter("./routes/eventRoutes")
-);
-
-app.use(
-  "/api/calendar",
-  loadRouter("./routes/calendarRoutes")
-);
-
-app.use(
-  "/api/appointments",
-  loadRouter("./routes/eventRoutes")
-);
-
-app.use(
-  "/api/calls",
-  loadRouter("./routes/callRoutes")
-);
-
-app.use(
-  "/api/contacts",
-  loadRouter("./routes/contactRoutes")
-);
-
-app.use(
-  "/api/leads",
-  loadRouter("./routes/contactRoutes")
-);
-
-app.use(
-  "/api/emails",
-  loadRouter("./routes/emailRoutes")
-);
-
-app.use(
-  "/api/media",
-  loadRouter("./routes/mediaRoutes")
-);
-
-app.use(
-  "/api/files",
-  loadRouter("./routes/mediaRoutes")
-);
-
-app.use(
-  "/api/campaigns",
-  loadRouter("./routes/campaignRoutes")
-);
-
-app.use(
-  "/api/marketing",
-  loadRouter("./routes/campaignRoutes")
-);
-
-app.use(
-  "/api/ai-agents",
-  loadRouter("./routes/agentRoutes")
-);
-
-app.use(
-  "/api/agents",
-  loadRouter("./routes/agentRoutes")
-);
-
-app.use(
-  "/api/analytics",
-  loadRouter("./routes/analyticsRoutes")
-);
-
-app.use(
-  "/api/settings",
-  loadRouter("./routes/settingsRoutes")
-);
-
-app.use(
-  "/api/activity",
-  loadRouter("./routes/activityRoutes")
-);
+for (const [prefix, routePath] of routes) {
+  app.use(prefix, loadRouter(routePath));
+}
 
 // =====================================================
 // 404 HANDLER
 // =====================================================
 
 app.use((req, res) => {
-  return res.status(404).json({
+  res.status(404).json({
     success: false,
     message: `Route ${req.originalUrl} not found`,
   });
@@ -418,28 +354,28 @@ app.use((req, res) => {
 // =====================================================
 
 app.use((error, req, res, next) => {
-  console.error(
-    "Global server error:",
-    error
-  );
+  console.error("[Server Error]", error);
 
   if (res.headersSent) {
     return next(error);
   }
 
-  // Specific handling for Multer file upload errors
   if (error instanceof multer.MulterError) {
-    if (error.code === "LIMIT_FILE_SIZE") {
-      return res.status(400).json({
-        success: false,
-        message:
-          "File size exceeds the allowed limit (10MB).",
-      });
-    }
+    const message =
+      error.code === "LIMIT_FILE_SIZE"
+        ? "File size exceeds the configured upload limit."
+        : `File upload error: ${error.message}`;
 
     return res.status(400).json({
       success: false,
-      message: `File upload error: ${error.message}`,
+      message,
+    });
+  }
+
+  if (error.message === "Not allowed by CORS") {
+    return res.status(403).json({
+      success: false,
+      message: "Origin is not allowed.",
     });
   }
 
@@ -450,17 +386,12 @@ app.use((error, req, res, next) => {
 });
 
 // =====================================================
-// SERVER CONFIGURATION
+// ATTENDANCE SCHEDULER
 // =====================================================
-
-const PORT = process.env.PORT || 5000;
 
 let attendanceScheduler = null;
 let attendanceEmailSchedulerStarted = false;
-
-// =====================================================
-// ATTENDANCE SCHEDULER
-// =====================================================
+let shuttingDown = false;
 
 const startAttendanceScheduler = () => {
   try {
@@ -469,40 +400,23 @@ const startAttendanceScheduler = () => {
     } = require("./controllers/attendanceController");
 
     if (
-      typeof processAttendanceNotifications !==
-      "function"
+      typeof processAttendanceNotifications !== "function"
     ) {
       console.warn(
-        "[Attendance] processAttendanceNotifications is not available."
+        "[Attendance] Processing function unavailable."
       );
-
       return;
     }
 
-    // Prevent duplicate scheduler
     if (attendanceScheduler) {
-      console.warn(
-        "[Attendance] Scheduler is already running."
-      );
-
       return;
     }
-
-    // -------------------------------------------------
-    // Initial processing
-    // -------------------------------------------------
 
     Promise.resolve()
-      .then(() => {
-        console.log(
-          "[Attendance] Running initial attendance processing..."
-        );
-
-        return processAttendanceNotifications();
-      })
+      .then(() => processAttendanceNotifications())
       .then((result) => {
         console.log(
-          "[Attendance] Initial processing:",
+          "[Attendance] Initial processing completed:",
           result
         );
       })
@@ -513,17 +427,13 @@ const startAttendanceScheduler = () => {
         );
       });
 
-    // -------------------------------------------------
-    // Run every 60 seconds
-    // -------------------------------------------------
-
     attendanceScheduler = setInterval(async () => {
       try {
         const result =
           await processAttendanceNotifications();
 
         console.log(
-          "[Attendance] Scheduler tick:",
+          "[Attendance] Scheduler completed:",
           result
         );
       } catch (error) {
@@ -535,11 +445,11 @@ const startAttendanceScheduler = () => {
     }, 60 * 1000);
 
     console.log(
-      "[Attendance] Scheduler started. Running every 60 seconds."
+      "[Attendance] Scheduler started (60 seconds)."
     );
   } catch (error) {
     console.error(
-      "[Attendance] Failed to start attendance scheduler:",
+      "[Attendance] Failed to start scheduler:",
       error
     );
   }
@@ -552,27 +462,19 @@ const startAttendanceScheduler = () => {
 const startAttendanceEmailSchedulerSafe = () => {
   try {
     if (
-      typeof startAttendanceEmailScheduler !==
-      "function"
+      typeof startAttendanceEmailScheduler !== "function"
     ) {
       console.warn(
-        "[Attendance Email] Scheduler function is not available."
+        "[Attendance Email] Scheduler unavailable."
       );
-
       return;
     }
 
-    // Prevent duplicate scheduler
     if (attendanceEmailSchedulerStarted) {
-      console.warn(
-        "[Attendance Email] Scheduler is already running."
-      );
-
       return;
     }
 
     startAttendanceEmailScheduler();
-
     attendanceEmailSchedulerStarted = true;
 
     console.log(
@@ -580,27 +482,25 @@ const startAttendanceEmailSchedulerSafe = () => {
     );
   } catch (error) {
     console.error(
-      "[Attendance Email] Failed to start scheduler:",
+      "[Attendance Email] Scheduler startup failed:",
       error
     );
   }
 };
 
-// =====================================================
-// STOP ATTENDANCE EMAIL SCHEDULER
-// =====================================================
-
 const stopAttendanceEmailSchedulerSafe = () => {
   try {
     if (
-      typeof stopAttendanceEmailScheduler !==
-      "function"
+      typeof stopAttendanceEmailScheduler !== "function"
     ) {
       return;
     }
 
-    stopAttendanceEmailScheduler();
+    if (!attendanceEmailSchedulerStarted) {
+      return;
+    }
 
+    stopAttendanceEmailScheduler();
     attendanceEmailSchedulerStarted = false;
 
     console.log(
@@ -608,7 +508,7 @@ const stopAttendanceEmailSchedulerSafe = () => {
     );
   } catch (error) {
     console.error(
-      "[Attendance Email] Failed to stop scheduler:",
+      "[Attendance Email] Scheduler shutdown failed:",
       error
     );
   }
@@ -620,46 +520,31 @@ const stopAttendanceEmailSchedulerSafe = () => {
 
 const startServer = async () => {
   try {
-    // -------------------------------------------------
-    // Connect MongoDB first
-    // -------------------------------------------------
-
     await connectDB();
 
     console.log(
       "[Database] MongoDB connection established."
     );
 
-    // -------------------------------------------------
-    // Start HTTP server
-    // -------------------------------------------------
-
     server.listen(PORT, () => {
       console.log(
-        `Backend running on http://localhost:${PORT}`
+        `[Server] Running on port ${PORT}`
       );
 
       console.log(
-        `[Environment] ${
-          process.env.NODE_ENV || "development"
-        }`
+        `[Environment] ${process.env.NODE_ENV || "development"}`
+      );
+
+      console.log(
+        "[Socket.IO] Real-server initialized with speed optimizations."
       );
     });
 
-    // -------------------------------------------------
-    // Start attendance scheduler
-    // -------------------------------------------------
-
     startAttendanceScheduler();
-
-    // -------------------------------------------------
-    // Start attendance email scheduler
-    // -------------------------------------------------
-
     startAttendanceEmailSchedulerSafe();
   } catch (error) {
     console.error(
-      "Failed to connect to MongoDB:",
+      "[Server] Failed to start:",
       error
     );
 
@@ -668,61 +553,43 @@ const startServer = async () => {
 };
 
 // =====================================================
-// START APPLICATION
-// =====================================================
-
-startServer();
-
-// =====================================================
 // GRACEFUL SHUTDOWN
 // =====================================================
 
 const shutdown = async (signal) => {
-  console.log(
-    `${signal} received. Shutting down server...`
-  );
+  if (shuttingDown) {
+    return;
+  }
 
-  // -------------------------------------------------
-  // Stop attendance scheduler
-  // -------------------------------------------------
+  shuttingDown = true;
+
+  console.log(
+    `[Server] ${signal} received. Shutting down...`
+  );
 
   if (attendanceScheduler) {
     clearInterval(attendanceScheduler);
-
     attendanceScheduler = null;
-
-    console.log(
-      "[Attendance] Scheduler stopped."
-    );
   }
-
-  // -------------------------------------------------
-  // Stop attendance email scheduler
-  // -------------------------------------------------
 
   stopAttendanceEmailSchedulerSafe();
 
-  // -------------------------------------------------
-  // Close HTTP server
-  // -------------------------------------------------
+  io.close();
 
   server.close(() => {
-    console.log(
-      "HTTP server closed."
-    );
-
+    console.log("[Server] HTTP server closed.");
     process.exit(0);
   });
+
+  setTimeout(() => {
+    console.error(
+      "[Server] Forced shutdown after timeout."
+    );
+    process.exit(1);
+  }, 10000).unref();
 };
 
-// =====================================================
-// PROCESS SIGNALS
-// =====================================================
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
 
-process.on("SIGINT", () => {
-  shutdown("SIGINT");
-});
-
-process.on("SIGTERM", () => {
-  shutdown("SIGTERM");
-});
+startServer();

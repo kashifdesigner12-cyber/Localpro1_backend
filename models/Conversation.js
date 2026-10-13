@@ -10,6 +10,23 @@ const ConversationSchema = new mongoose.Schema(
       }
     ],
 
+    // New fields for Microsoft Teams style Group Chat support
+    isGroup: {
+      type: Boolean,
+      default: false
+    },
+
+    groupName: {
+      type: String,
+      default: ''
+    },
+
+    groupAdmin: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null
+    },
+
     lastMessage: {
       type: String,
       default: ''
