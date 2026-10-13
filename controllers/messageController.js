@@ -292,9 +292,20 @@ const sendMessage = async (req, res) => {
         return res.status(400).json({ success: false, message: 'Cannot send message to yourself.' });
       }
 
-      const targetUser = await User.findById(targetUserId).select('_id').lean();
+      const targetUser = await User.findById(targetUserId).select('_id role').lean();
       if (!targetUser) {
         return res.status(404).json({ success: false, message: 'Recipient user not found.' });
+      }
+
+      // STRICT ADMIN PRIVACY RULE: Regular users can only message admins or managers
+      if (userRole !== 'admin' && userRole !== 'manager') {
+        const targetRole = String(targetUser.role || '').toLowerCase();
+        if (targetRole !== 'admin' && targetRole !== 'manager' && targetRole !== 'support') {
+          return res.status(403).json({
+            success: false,
+            message: 'Access denied. Regular users can only message Admin or Support.'
+          });
+        }
       }
 
       conversation = await Conversation.findOne({
@@ -361,7 +372,7 @@ const sendMessage = async (req, res) => {
         conversation.participants.forEach((participantId) => {
           io.to(participantId.toString()).emit('notification', {
             type: 'message',
-            title: `New message from ${req.user.name || 'User'}`,
+            title: `New message from ${req.user.name || 'Admin / Support'}`,
             message: previewText,
             conversationId: conversation._id,
             messageId: formattedMessage._id
@@ -377,7 +388,7 @@ const sendMessage = async (req, res) => {
             userId: resolvedRecipientId,
             type: 'message',
             title: 'New Message',
-            message: `${req.user.name || 'A user'} sent you a message.`,
+            message: `${req.user.name || 'Admin'} sent you a message.`,
             relatedId: conversation._id,
             relatedType: 'Message',
             actionUrl: userRole === 'admin' ? '/admin/conversations' : userRole === 'manager' ? '/manager/conversations' : '/user/conversations',
@@ -398,7 +409,7 @@ const sendMessage = async (req, res) => {
             await sendMessageNotificationEmail(
               recipientUser.email,
               recipientUser.name || 'User',
-              req.user.name || 'Admin',
+              req.user.name || 'Admin / Support',
               previewText
             );
           }
@@ -690,7 +701,7 @@ const deleteMessageForEveryone = async (req, res) => {
 
 const deleteMessage = async (req, res) => {
   try {
-    const { id } = req.params;
+    const { id } = req.params.id;
     const deleteType = String(req.query.type || req.body.type || req.body.deleteType || '').toLowerCase();
 
     if (!isValidObjectId(id)) {
@@ -720,7 +731,7 @@ const deleteMessage = async (req, res) => {
     return deleteMessageForMe(req, res);
   } catch (error) {
     console.error('deleteMessage error:', error);
-    return res.status(500).json({ success: false, message: 'Server error deleting message.' });
+    return res.status(500).json({ success: false, message: 'Server errorogranization error.' });
   }
 };
 

@@ -310,7 +310,7 @@ const populateMessage = (
 };
 
 // ============================================================================
-// GET AVAILABLE CONTACTS
+// GET AVAILABLE CONTACTS (Strict Admin-Only Privacy for regular users)
 // ============================================================================
 
 const getAvailableContacts = async (
@@ -321,37 +321,16 @@ const getAvailableContacts = async (
     return [];
   }
 
-  const currentUserId =
-    req.user._id;
-
+  const currentUserId = req.user._id;
   let roles = [];
 
-  if (
-    req.user.role === "admin"
-  ) {
-    roles = [
-      "manager",
-      "user",
-      "admin",
-    ];
-  } else if (
-    req.user.role === "manager"
-  ) {
-    roles = [
-      "user",
-      "manager",
-      "admin",
-    ];
-  } else if (
-    req.user.role === "user"
-  ) {
-    roles = [
-      "admin",
-      "manager",
-      "user",
-    ];
+  // STRICT PRIVACY: If user role is 'user', they can ONLY see admins and managers. No other regular users!
+  if (req.user.role === "admin") {
+    roles = ["manager", "user", "admin"];
+  } else if (req.user.role === "manager") {
+    roles = ["user", "manager", "admin"];
   } else {
-    roles = ["admin", "manager", "user"];
+    roles = ["admin", "manager"]; // Regular users can ONLY see Admin / Manager
   }
 
   const filter = {
@@ -539,10 +518,22 @@ const getConversations = async (
 
     let filteredConversations = conversations;
 
+    // For non-admin users, strictly filter conversations so they only see threads involving an Admin/Manager
+    if (req.user.role !== "admin" && req.user.role !== "manager") {
+      filteredConversations = filteredConversations.filter((conv) => {
+        const parts = Array.isArray(conv.participants) ? conv.participants : [];
+        return parts.some((p) => {
+          const pId = p?._id || p;
+          const pRole = String(p?.role || "").trim().toLowerCase();
+          return String(pId) !== String(currentUserId) && (pRole === "admin" || pRole === "manager" || pRole === "support");
+        });
+      });
+    }
+
     if (search && search.trim()) {
       const searchTerm = search.trim().toLowerCase();
 
-      filteredConversations = conversations.filter((conversation) => {
+      filteredConversations = filteredConversations.filter((conversation) => {
         if (conversation.isGroup && conversation.groupName && conversation.groupName.toLowerCase().includes(searchTerm)) {
           return true;
         }
@@ -713,7 +704,7 @@ const getConversation = async (
 };
 
 // ============================================================================
-// CREATE CONVERSATION (Supports Direct Chat & Microsoft Teams style Groups)
+// CREATE CONVERSATION
 // ============================================================================
 
 const createConversation = async (
@@ -768,11 +759,9 @@ const createConversation = async (
       }
     }
 
-    // Ensure current user is included in participants
     const allParticipantsSet = new Set([req.user._id.toString(), ...participantIds.map(id => id.toString())]);
     const finalParticipants = Array.from(allParticipantsSet);
 
-    // If direct chat (size 2), check if conversation already exists
     if (!isGroup && finalParticipants.length === 2) {
       const otherUserId = finalParticipants.find(id => id !== req.user._id.toString());
       let conversation =
@@ -811,7 +800,6 @@ const createConversation = async (
       }
     }
 
-    // Create new direct or group conversation
     const createdConv =
       await Conversation.create({
         participants: finalParticipants,
@@ -837,7 +825,6 @@ const createConversation = async (
         0
       );
 
-    // Real-time emission via Socket.io for instant creation update
     const io = req.app.get("io");
     if (io) {
       finalParticipants.forEach(pId => {
@@ -1005,7 +992,7 @@ const getConversationMessages =
   };
 
 // ============================================================================
-// SEND MESSAGE (Optimized for 1s Real-time Broadcast & Notification)
+// SEND MESSAGE
 // ============================================================================
 
 const sendConversationMessage =
@@ -1201,9 +1188,6 @@ const sendConversationMessage =
           populated
         );
 
-      // ============================================================================
-      // SOCKET.IO REAL-TIME BROADCAST (1s speed delivery & notification)
-      // ============================================================================
       const io = req.app.get("io");
       if (io) {
         io.to(conversation._id.toString()).emit("receive_message", formattedMessage);
@@ -1224,7 +1208,6 @@ const sendConversationMessage =
         }
       }
 
-      // In-app & Email Notification (Non-blocking)
       if (Array.isArray(conversation.participants)) {
         conversation.participants.forEach((participantId) => {
           if (participantId.toString() !== req.user._id.toString()) {
@@ -1838,7 +1821,7 @@ const findOrCreateConversation =
       await Conversation.findOne({
         isGroup: { $ne: true },
         participants: {
-          $all: [             userId,             contactId,           ],$size: 2,
+          $all: [            userId,            contactId,          ],$size: 2,
         },
       });
 
