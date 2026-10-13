@@ -10,7 +10,6 @@ const ConversationSchema = new mongoose.Schema(
       }
     ],
 
-    // New fields for Microsoft Teams style Group Chat support
     isGroup: {
       type: Boolean,
       default: false
@@ -66,7 +65,6 @@ const ConversationSchema = new mongoose.Schema(
       default: 'chat'
     },
 
-    // Legacy fields for backward compatibility
     userId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
@@ -84,17 +82,8 @@ const ConversationSchema = new mongoose.Schema(
   }
 );
 
-ConversationSchema.index({
-  participants: 1,
-  updatedAt: -1
-});
-
-ConversationSchema.index({
-  updatedAt: -1
-});
-
-ConversationSchema.index({
-  lastMessageAt: -1
-});
+ConversationSchema.index({ participants: 1, lastMessageAt: -1 });
+ConversationSchema.index({ updatedAt: -1 });
+ConversationSchema.index({ lastMessageAt: -1 });
 
 module.exports = mongoose.model('Conversation', ConversationSchema);

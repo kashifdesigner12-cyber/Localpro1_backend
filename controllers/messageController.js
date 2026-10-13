@@ -297,7 +297,6 @@ const sendMessage = async (req, res) => {
         return res.status(404).json({ success: false, message: 'Recipient user not found.' });
       }
 
-      // STRICT ADMIN PRIVACY RULE: Regular users can only message admins or managers
       if (userRole !== 'admin' && userRole !== 'manager') {
         const targetRole = String(targetUser.role || '').toLowerCase();
         if (targetRole !== 'admin' && targetRole !== 'manager' && targetRole !== 'support') {
@@ -701,10 +700,10 @@ const deleteMessageForEveryone = async (req, res) => {
 
 const deleteMessage = async (req, res) => {
   try {
-    const { id } = req.params.id;
+    const messageId = req.params.id;
     const deleteType = String(req.query.type || req.body.type || req.body.deleteType || '').toLowerCase();
 
-    if (!isValidObjectId(id)) {
+    if (!isValidObjectId(messageId)) {
       return res.status(400).json({ success: false, message: 'Invalid message ID.' });
     }
 
@@ -716,7 +715,7 @@ const deleteMessage = async (req, res) => {
       return deleteMessageForEveryone(req, res);
     }
 
-    const message = await Message.findById(id).select('sender').lean();
+    const message = await Message.findById(messageId).select('sender').lean();
     if (!message) {
       return res.status(404).json({ success: false, message: 'Message not found.' });
     }
@@ -731,7 +730,7 @@ const deleteMessage = async (req, res) => {
     return deleteMessageForMe(req, res);
   } catch (error) {
     console.error('deleteMessage error:', error);
-    return res.status(500).json({ success: false, message: 'Server errorogranization error.' });
+    return res.status(500).json({ success: false, message: 'Server error deleting message.' });
   }
 };
 

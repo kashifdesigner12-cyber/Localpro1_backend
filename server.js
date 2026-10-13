@@ -21,6 +21,7 @@ const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const multer = require("multer");
 const { Server } = require("socket.io");
+const jwt = require("jsonwebtoken");
 
 const connectDB = require("./config/db");
 
@@ -94,7 +95,7 @@ const corsOptions = {
 };
 
 // =====================================================
-// SOCKET.IO
+// SOCKET.IO (WHATSAPP SPEED OPTIMIZED)
 // =====================================================
 
 const io = new Server(server, {
@@ -116,6 +117,23 @@ const activeUsers = new Map();
 
 io.on("connection", (socket) => {
   console.log(`[Socket.IO] Connected: ${socket.id}`);
+
+  // Auto-extract user from handshake auth token for instant room joining
+  try {
+    const token = socket.handshake.auth?.token || socket.handshake.headers?.authorization?.split(" ")[1];
+    if (token && process.env.JWT_SECRET) {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      const userId = decoded?.id || decoded?._id || decoded?.userId;
+      if (userId) {
+        const id = String(userId);
+        activeUsers.set(id, socket.id);
+        socket.join(id);
+        console.log(`[Socket.IO] Auto-joined user room via token: ${id}`);
+      }
+    }
+  } catch (err) {
+    // Fallback to explicit user_join event if token verify fails
+  }
 
   socket.on("user_join", (userId) => {
     if (userId) {
@@ -522,9 +540,6 @@ const startServer = async () => {
     });
   } catch (error) {
     console.error("[Server] Failed to start:", error.message);
-
-    // Do not keep a broken process running without a database.
-    // Exit code lets the process manager report the startup failure.
     process.exitCode = 1;
   }
 };

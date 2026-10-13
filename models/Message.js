@@ -121,7 +121,6 @@ const MessageSchema = new mongoose.Schema(
   }
 );
 
-// Custom validation: Message body or at least one attachment must exist
 MessageSchema.pre("validate", function (next) {
   if (this.isDeletedForEveryone) {
     return next();
@@ -146,27 +145,9 @@ MessageSchema.pre("validate", function (next) {
   next();
 });
 
-MessageSchema.index({
-  conversation: 1,
-  createdAt: 1,
-});
-
-MessageSchema.index({
-  recipient: 1,
-  isRead: 1,
-});
-
-MessageSchema.index({
-  sender: 1,
-  createdAt: -1,
-});
-
-MessageSchema.index({
-  deletedFor: 1,
-});
-
-MessageSchema.index({
-  isDeletedForEveryone: 1,
-});
+MessageSchema.index({ conversation: 1, createdAt: 1 });
+MessageSchema.index({ recipient: 1, isRead: 1 });
+MessageSchema.index({ sender: 1, createdAt: -1 });
+MessageSchema.index({ conversation: 1, deletedFor: 1 }); // Optimized for deleted-for queries
 
 module.exports = mongoose.model("Message", MessageSchema);

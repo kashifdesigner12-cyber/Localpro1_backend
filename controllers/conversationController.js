@@ -324,13 +324,12 @@ const getAvailableContacts = async (
   const currentUserId = req.user._id;
   let roles = [];
 
-  // STRICT PRIVACY: If user role is 'user', they can ONLY see admins and managers. No other regular users!
   if (req.user.role === "admin") {
     roles = ["manager", "user", "admin"];
   } else if (req.user.role === "manager") {
     roles = ["user", "manager", "admin"];
   } else {
-    roles = ["admin", "manager"]; // Regular users can ONLY see Admin / Manager
+    roles = ["admin", "manager", "support"]; // Regular users can ONLY see Admin / Support / Manager
   }
 
   const filter = {
@@ -518,7 +517,6 @@ const getConversations = async (
 
     let filteredConversations = conversations;
 
-    // For non-admin users, strictly filter conversations so they only see threads involving an Admin/Manager
     if (req.user.role !== "admin" && req.user.role !== "manager") {
       filteredConversations = filteredConversations.filter((conv) => {
         const parts = Array.isArray(conv.participants) ? conv.participants : [];
@@ -1198,7 +1196,7 @@ const sendConversationMessage =
             if (participantId.toString() !== req.user._id.toString()) {
               io.to(participantId.toString()).emit("notification", {
                 type: "message",
-                title: `New message from ${req.user.name || "User"}`,
+                title: `New message from ${req.user.name || "Admin / Support"}`,
                 message: previewText,
                 conversationId: conversation._id,
                 messageId: formattedMessage._id
@@ -1217,7 +1215,7 @@ const sendConversationMessage =
                   userId: participantId,
                   type: "message",
                   title: conversation.isGroup ? `New message in ${conversation.groupName || 'Group'}` : "New Message",
-                  message: `${req.user.name || "A user"} sent a message.`,
+                  message: `${req.user.name || "Admin"} sent a message.`,
                   relatedId: conversation._id,
                   relatedType: "Message",
                   actionUrl: req.user.role === 'admin' ? '/admin/conversations' : '/manager/conversations',
@@ -1844,8 +1842,6 @@ const findOrCreateConversation =
     return conversation;
   };
 
-// ============================================================================
-// EXPORTS
 // ============================================================================
 
 module.exports = {
