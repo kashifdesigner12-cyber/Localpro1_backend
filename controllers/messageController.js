@@ -114,6 +114,7 @@ const getIo = (req) => req.app.get("io");
 
 const emitToConversation = (io, conversationId, eventName, payload) => {
   if (!io || !conversationId) return;
+
   io.to(String(conversationId)).emit(eventName, payload);
 };
 
@@ -164,12 +165,12 @@ const canAccessConversation = (conversation, userId, role) => {
   const isParticipant =
     Array.isArray(conversation.participants) &&
     conversation.participants.some(
-      (participant) => String(participant) === String(userId)
+      (participant) => String(participant?._id || participant) === String(userId)
     );
 
   const isLegacyUser =
     conversation.userId &&
-    String(conversation.userId) === String(userId);
+    String(conversation.userId?._id || conversation.userId) === String(userId);
 
   return (
     isParticipant ||
@@ -351,7 +352,7 @@ const getMessageById = async (req, res) => {
 };
 
 // =====================================================
-// SEND MESSAGE - LOW LATENCY + NOTIFICATIONS
+// SEND MESSAGE
 // =====================================================
 
 const sendMessage = async (req, res) => {
@@ -369,7 +370,6 @@ const sendMessage = async (req, res) => {
     const currentUserId = String(req.user._id);
     const role = String(req.user?.role || "").toLowerCase();
 
-    // Parse attachments from JSON or uploaded files.
     let rawAttachments = req.body.attachments;
 
     if (typeof rawAttachments === "string") {
@@ -411,7 +411,6 @@ const sendMessage = async (req, res) => {
       });
     }
 
-    // Remove duplicate attachment entries.
     const seen = new Set();
 
     attachments = attachments.filter((attachment) => {
@@ -431,7 +430,6 @@ const sendMessage = async (req, res) => {
       });
     }
 
-    // Resolve conversation.
     let conversation = null;
     let recipientUser = null;
 
@@ -517,38 +515,72 @@ const sendMessage = async (req, res) => {
       }
     }
 
-    // Resolve recipient without requiring a second user lookup.
-    let resolvedRecipientId = null;
+    // Resolve the recipient from the conversation participants.
+    // This is the user who should receive this message, not the sender.
+    const participantIds = Array.isArray(conversation.participants)
+      ? conversation.participants.map((participant) =>
+          String(participant?._id || participant)
+        )
+      : [];
 
-    if (Array.isArray(conversation.participants)) {
-      const other = conversation.participants.find(
-        (participant) => String(participant) !== currentUserId
-      );
-      if (other) resolvedRecipientId = other;
-    }
+    let resolvedRecipientId = participantIds.find(
+      (participantId) => participantId !== currentUserId
+    );
 
     if (
       !resolvedRecipientId &&
       conversation.userId &&
-      String(conversation.userId) !== currentUserId
+      String(conversation.userId?._id || conversation.userId) !== currentUserId
     ) {
-      resolvedRecipientId = conversation.userId;
+      resolvedRecipientId = String(
+        conversation.userId?._id || conversation.userId
+      );
     }
 
+    // Explicit recipient is only a fallback when the conversation
+    // does not provide another participant.
     if (!resolvedRecipientId && (recipientId || to)) {
-      const targetId = recipientId || to;
-      if (String(targetId) !== currentUserId) {
+      const targetId = String(recipientId || to);
+
+      if (targetId !== currentUserId) {
         resolvedRecipientId = targetId;
       }
     }
 
-    const recipientIdString = resolvedRecipientId
-      ? String(resolvedRecipientId)
-      : null;
+    if (!resolvedRecipientId) {
+      return res.status(400).json({
+        success: false,
+        message: "Could not resolve the other participant in this conversation.",
+      });
+    }
 
-    // Only perform a user lookup before sending if this is a new conversation
-    // and we already fetched the recipient above. Existing conversations do
-    // not need to wait for a recipient profile query.
+    if (!isValidObjectId(resolvedRecipientId)) {
+      return res.status(400).json({
+        success: false,
+        message: "The recipient ID in this conversation is invalid.",
+      });
+    }
+
+    if (resolvedRecipientId === currentUserId) {
+      return res.status(400).json({
+        success: false,
+        message: "Cannot send a message to yourself.",
+      });
+    }
+
+    if (!recipientUser) {
+      recipientUser = await User.findById(resolvedRecipientId)
+        .select("_id name email role avatar")
+        .lean();
+    }
+
+    if (!recipientUser) {
+      return res.status(404).json({
+        success: false,
+        message: "Conversation recipient was not found.",
+      });
+    }
+
     const calculatedMessageType =
       attachments.length > 0
         ? determineMessageType(
@@ -582,17 +614,13 @@ const sendMessage = async (req, res) => {
       status: req.user.status,
     };
 
-    const recipientPayload = recipientUser
-      ? {
-          _id: recipientUser._id,
-          name: recipientUser.name || "",
-          email: recipientUser.email || "",
-          role: recipientUser.role || "",
-          avatar: recipientUser.avatar || null,
-        }
-      : resolvedRecipientId
-        ? { _id: resolvedRecipientId }
-        : null;
+    const recipientPayload = {
+      _id: recipientUser._id,
+      name: recipientUser.name || "",
+      email: recipientUser.email || "",
+      role: recipientUser.role || "",
+      avatar: recipientUser.avatar || null,
+    };
 
     const formattedMessage = safeMessage(
       {
@@ -605,7 +633,7 @@ const sendMessage = async (req, res) => {
 
     const io = getIo(req);
 
-    // 1) Emit message immediately after it is saved.
+    // Emit the saved message to everyone in the same conversation.
     if (io) {
       emitToConversation(
         io,
@@ -614,8 +642,6 @@ const sendMessage = async (req, res) => {
         formattedMessage
       );
 
-      // Keep this event for older clients. Frontend should de-duplicate
-      // receive_message and new_message using message._id.
       emitToConversation(
         io,
         conversationIdString,
@@ -623,57 +649,50 @@ const sendMessage = async (req, res) => {
         formattedMessage
       );
 
-      if (
-        recipientIdString &&
-        recipientIdString !== currentUserId
-      ) {
-        // Send to recipient's other connected tabs/devices not currently
-        // joined to this conversation room.
-        emitToUserOutsideConversation(
-          io,
-          recipientIdString,
-          conversationIdString,
-          "receive_message",
-          formattedMessage
-        );
+      // Deliver to the recipient's other tabs/devices if they
+      // are not currently joined to this conversation room.
+      emitToUserOutsideConversation(
+        io,
+        resolvedRecipientId,
+        conversationIdString,
+        "receive_message",
+        formattedMessage
+      );
 
-        emitToUserOutsideConversation(
-          io,
-          recipientIdString,
-          conversationIdString,
-          "new_message",
-          formattedMessage
-        );
+      emitToUserOutsideConversation(
+        io,
+        resolvedRecipientId,
+        conversationIdString,
+        "new_message",
+        formattedMessage
+      );
 
-        const senderName =
-          req.user.name || (role === "admin" ? "Admin" : "User");
+      const senderName =
+        req.user.name || (role === "admin" ? "Admin" : "User");
 
-        const notificationPayload = {
-          type: "message",
-          title: `New message from ${senderName}`,
-          message: previewText,
-          conversationId: conversationIdString,
-          messageId: String(createdMessage._id),
-          senderId: currentUserId,
-          senderName,
-          createdAt: now,
-        };
+      const notificationPayload = {
+        type: "message",
+        title: `New message from ${senderName}`,
+        message: previewText,
+        conversationId: conversationIdString,
+        messageId: String(createdMessage._id),
+        senderId: currentUserId,
+        senderName,
+        createdAt: now,
+      };
 
-        // Socket notification is immediate for online recipients.
-        io.to(recipientIdString).emit(
-          "notification",
-          notificationPayload
-        );
+      io.to(resolvedRecipientId).emit(
+        "notification",
+        notificationPayload
+      );
 
-        // Compatibility event for clients using this older event name.
-        io.to(recipientIdString).emit(
-          "message_notification",
-          notificationPayload
-        );
-      }
+      io.to(resolvedRecipientId).emit(
+        "message_notification",
+        notificationPayload
+      );
     }
 
-    // 2) Update conversation preview in background; do not block delivery.
+    // Update conversation preview asynchronously.
     Conversation.updateOne(
       { _id: conversation._id },
       {
@@ -693,71 +712,56 @@ const sendMessage = async (req, res) => {
         );
       });
 
-    // 3) Create persistent notification and send email in the background.
-    if (
-      recipientIdString &&
-      recipientIdString !== currentUserId
-    ) {
-      const senderName =
-        req.user.name || (role === "admin" ? "Admin" : "User");
+    // Persistent notification and email are processed in the background.
+    const senderName =
+      req.user.name || (role === "admin" ? "Admin" : "User");
 
-      setImmediate(() => {
-        void (async () => {
-          try {
-            await createNotification({
-              userId: resolvedRecipientId,
-              type: "message",
-              title: "New Message",
-              message: `${senderName} sent you a message.`,
-              relatedId: conversation._id,
-              relatedType: "Message",
-              actionUrl:
-                role === "admin" || role === "manager"
-                  ? "/user/conversations"
-                  : "/admin/conversations",
-              metadata: {
-                conversationId: conversation._id,
-                messageId: createdMessage._id,
-                senderId: req.user._id,
-                senderName,
-              },
-            });
-          } catch (error) {
-            console.error(
-              "[Messages] Notification creation failed:",
-              error.message
+    setImmediate(() => {
+      void (async () => {
+        try {
+          await createNotification({
+            userId: resolvedRecipientId,
+            type: "message",
+            title: "New Message",
+            message: `${senderName} sent you a message.`,
+            relatedId: conversation._id,
+            relatedType: "Message",
+            actionUrl:
+              role === "admin" || role === "manager"
+                ? "/user/conversations"
+                : "/admin/conversations",
+            metadata: {
+              conversationId: conversation._id,
+              messageId: createdMessage._id,
+              senderId: req.user._id,
+              senderName,
+            },
+          });
+        } catch (error) {
+          console.error(
+            "[Messages] Notification creation failed:",
+            error.message
+          );
+        }
+
+        try {
+          if (recipientUser.email) {
+            await sendMessageNotificationEmail(
+              recipientUser.email,
+              recipientUser.name || "User",
+              senderName,
+              previewText
             );
           }
+        } catch (error) {
+          console.error(
+            "[Messages] Notification email failed:",
+            error.message
+          );
+        }
+      })();
+    });
 
-          try {
-            let emailRecipient = recipientUser;
-
-            if (!emailRecipient) {
-              emailRecipient = await User.findById(resolvedRecipientId)
-                .select("name email")
-                .lean();
-            }
-
-            if (emailRecipient?.email) {
-              await sendMessageNotificationEmail(
-                emailRecipient.email,
-                emailRecipient.name || "User",
-                senderName,
-                previewText
-              );
-            }
-          } catch (error) {
-            console.error(
-              "[Messages] Notification email failed:",
-              error.message
-            );
-          }
-        })();
-      });
-    }
-
-    // HTTP response does not wait for email, persistent notification,
-    // conversation preview update, or recipient profile lookup.
     return res.status(201).json({
       success: true,
       message: "Message sent successfully.",

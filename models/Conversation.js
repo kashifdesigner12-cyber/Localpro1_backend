@@ -2,13 +2,26 @@ const mongoose = require('mongoose');
 
 const ConversationSchema = new mongoose.Schema(
   {
-    participants: [
-      {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'User',
-        required: true
+    participants: {
+      type: [
+        {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: 'User',
+          required: true
+        }
+      ],
+      default: [],
+      validate: {
+        validator: function (participants) {
+          if (this.isGroup) {
+            return participants.length >= 2;
+          }
+
+          return participants.length >= 2;
+        },
+        message: 'A conversation must have at least two participants.'
       }
-    ],
+    },
 
     isGroup: {
       type: Boolean,
@@ -17,7 +30,8 @@ const ConversationSchema = new mongoose.Schema(
 
     groupName: {
       type: String,
-      default: ''
+      default: '',
+      trim: true
     },
 
     groupAdmin: {
@@ -33,7 +47,15 @@ const ConversationSchema = new mongoose.Schema(
 
     lastMessageType: {
       type: String,
-      enum: ['text', 'image', 'file', 'document', 'video', 'audio', 'system'],
+      enum: [
+        'text',
+        'image',
+        'file',
+        'document',
+        'video',
+        'audio',
+        'system'
+      ],
       default: 'text'
     },
 
@@ -50,7 +72,8 @@ const ConversationSchema = new mongoose.Schema(
 
     unreadCount: {
       type: Number,
-      default: 0
+      default: 0,
+      min: 0
     },
 
     status: {
@@ -82,8 +105,30 @@ const ConversationSchema = new mongoose.Schema(
   }
 );
 
-ConversationSchema.index({ participants: 1, lastMessageAt: -1 });
-ConversationSchema.index({ updatedAt: -1 });
-ConversationSchema.index({ lastMessageAt: -1 });
+// Indexes for conversation lookup and sorting
+ConversationSchema.index({
+  participants: 1,
+  lastMessageAt: -1
+});
 
-module.exports = mongoose.model('Conversation', ConversationSchema);
+ConversationSchema.index({
+  updatedAt: -1
+});
+
+ConversationSchema.index({
+  lastMessageAt: -1
+});
+
+// Keep conversation metadata updated whenever a document is saved
+ConversationSchema.pre('save', function (next) {
+  if (this.lastMessageAt && this.lastMessageAt > this.updatedAt) {
+    this.updatedAt = this.lastMessageAt;
+  }
+
+  next();
+});
+
+module.exports = mongoose.model(
+  'Conversation',
+  ConversationSchema
+);
