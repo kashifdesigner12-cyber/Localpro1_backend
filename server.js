@@ -1,3 +1,4 @@
+
 "use strict";
 
 // =====================================================
@@ -30,10 +31,44 @@ const {
 
 const app = express();
 const server = http.createServer(app);
+
 const PORT = process.env.PORT || 5000;
 
-const normalizeOrigin = (origin) =>
-  origin ? origin.replace(/\/+$/, "") : origin;
+app.disable("x-powered-by");
+
+// =====================================================
+// CORS CONFIGURATION
+// =====================================================
+
+// Always compare normalized origins, not full URL paths.
+// Example: https://example.com/path becomes https://example.com.
+
+function normalizeOrigin(value) {
+  if (!value || typeof value !== "string") {
+    return null;
+  }
+
+  const input = value.trim();
+
+  if (!input) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(input);
+
+    if (
+      parsed.protocol !== "http:" &&
+      parsed.protocol !== "https:"
+    ) {
+      return null;
+    }
+
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
 
 const allowedOrigins = new Set([
   "http://localhost:3000",
@@ -43,32 +78,52 @@ const allowedOrigins = new Set([
   "https://www.localpro1.net",
 ]);
 
-if (process.env.FRONTEND_URL) {
-  for (const origin of process.env.FRONTEND_URL.split(",")) {
-    const normalized = normalizeOrigin(origin.trim());
+// Hostinger environment variable example:
+// FRONTEND_URL=https://your-frontend.com,https://www.your-frontend.com
 
-    if (normalized) {
-      allowedOrigins.add(normalized);
+function addConfiguredOrigins(value, variableName) {
+  if (!value) return;
+
+  for (const item of value.split(",")) {
+    const origin = normalizeOrigin(item);
+
+    if (origin) {
+      allowedOrigins.add(origin);
+      console.log(`[CORS] Allowed origin configured: ${origin}`);
+    } else if (item.trim()) {
+      console.warn(
+        `[CORS] Invalid URL in ${variableName}: ${item.trim()}`
+      );
     }
   }
 }
 
-if (process.env.FRONTEND_LOGIN_URL) {
-  const normalized = normalizeOrigin(
-    process.env.FRONTEND_LOGIN_URL.trim()
-  );
+addConfiguredOrigins(
+  process.env.FRONTEND_URL,
+  "FRONTEND_URL"
+);
 
-  if (normalized) {
-    try {
-      allowedOrigins.add(new URL(normalized).origin);
-    } catch {
-      console.warn("[CORS] Invalid FRONTEND_LOGIN_URL.");
-    }
-  }
-}
+addConfiguredOrigins(
+  process.env.FRONTEND_LOGIN_URL,
+  "FRONTEND_LOGIN_URL"
+);
+
+// Optional additional domains:
+// FRONTEND_URL=https://frontend.example.com,https://www.frontend.example.com
 
 const corsOrigin = (origin, callback) => {
-  if (!origin || allowedOrigins.has(normalizeOrigin(origin))) {
+  // Requests without an Origin header can include server-to-server
+  // requests, health checks, and some command-line requests.
+  if (!origin) {
+    return callback(null, true);
+  }
+
+  const normalizedOrigin = normalizeOrigin(origin);
+
+  if (
+    normalizedOrigin &&
+    allowedOrigins.has(normalizedOrigin)
+  ) {
     return callback(null, true);
   }
 
@@ -80,7 +135,14 @@ const corsOrigin = (origin, callback) => {
 const corsOptions = {
   origin: corsOrigin,
   credentials: true,
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  methods: [
+    "GET",
+    "POST",
+    "PUT",
+    "PATCH",
+    "DELETE",
+    "OPTIONS",
+  ],
   allowedHeaders: [
     "Content-Type",
     "Authorization",
@@ -91,31 +153,27 @@ const corsOptions = {
   maxAge: 600,
 };
 
+const socketCorsOptions = {
+  origin: corsOrigin,
+  credentials: true,
+  methods: ["GET", "POST"],
+};
+
 // =====================================================
-// SOCKET.IO - REAL-TIME CONFIGURATION
+// SOCKET.IO
 // =====================================================
 
 const io = new Server(server, {
-  cors: {
-    origin: corsOrigin,
-    credentials: true,
-    methods: ["GET", "POST"],
-  },
+  cors: socketCorsOptions,
 
-  // Prefer WebSocket, retain polling as a fallback.
+  // WebSocket first, HTTP polling fallback.
   transports: ["websocket", "polling"],
 
-  // Connection health settings.
   pingInterval: 25000,
   pingTimeout: 20000,
   connectTimeout: 20000,
-
-  // Allow message/file payloads up to 5 MB over Socket.IO.
-  // HTTP upload limits are configured separately.
   maxHttpBufferSize: 5e6,
 
-  // Restore socket rooms and missed packets after a short
-  // disconnection when supported by the Socket.IO adapter.
   connectionStateRecovery: {
     maxDisconnectionDuration: 120000,
     skipMiddlewares: false,
@@ -124,8 +182,7 @@ const io = new Server(server, {
 
 app.set("io", io);
 
-// userId -> Set of connected socket IDs.
-// Supports multiple tabs and devices.
+// userId -> Set of socket IDs
 const activeUsers = new Map();
 
 app.set("activeUsers", activeUsers);
@@ -148,7 +205,6 @@ function removeActiveSocket(userId, socketId) {
 
   sockets.delete(socketId);
 
-  // A user is offline only when their last connection closes.
   if (sockets.size === 0) {
     activeUsers.delete(id);
 
@@ -181,12 +237,14 @@ io.on("connection", (socket) => {
   const connectedAt = Date.now();
 
   console.log(
-    `[Socket.IO] Connected: ${socket.id}; transport=${socket.conn.transport.name}`
+    `[Socket.IO] Connected: ${socket.id}; ` +
+    `transport=${socket.conn.transport.name}; ` +
+    `origin=${socket.handshake.headers.origin || "none"}`
   );
 
   let connectedUserId = null;
 
-  // Authenticate using the existing JWT token format.
+  // Authenticate the socket using the JWT token.
   try {
     const authorization =
       socket.handshake.headers?.authorization || "";
@@ -196,7 +254,10 @@ io.on("connection", (socket) => {
       authorization.replace(/^Bearer\s+/i, "");
 
     if (token && process.env.JWT_SECRET) {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      const decoded = jwt.verify(
+        token,
+        process.env.JWT_SECRET
+      );
 
       const userId =
         decoded?.id ||
@@ -207,10 +268,12 @@ io.on("connection", (socket) => {
         connectedUserId = String(userId);
         socket.data.userId = connectedUserId;
 
-        // Every authenticated socket joins its private user room.
         socket.join(connectedUserId);
 
-        addActiveSocket(connectedUserId, socket.id);
+        addActiveSocket(
+          connectedUserId,
+          socket.id
+        );
 
         io.emit("update_user_status", {
           userId: connectedUserId,
@@ -218,38 +281,37 @@ io.on("connection", (socket) => {
         });
 
         console.log(
-          `[Socket.IO] Authenticated user ${connectedUserId} joined private room`
+          `[Socket.IO] Authenticated user ${connectedUserId}`
         );
       }
     }
   } catch (error) {
     console.warn(
-      `[Socket.IO] Authentication failed for ${socket.id}: ${error.message}`
+      `[Socket.IO] Authentication failed for ${socket.id}:`,
+      error.message
     );
   }
 
-  // Legacy compatibility with existing clients.
-  // Remove unauthenticated identity assignment after all clients
-  // reliably send a valid JWT during the Socket.IO handshake.
+  // Legacy compatibility. Authenticated users cannot impersonate
+  // a different user. Unauthenticated user_join remains a legacy
+  // compatibility path and should be removed once all clients
+  // send a valid JWT during the handshake.
   socket.on("user_join", (userId) => {
     if (!userId) return;
 
     const requestedId = String(userId);
 
-    // An authenticated socket cannot impersonate another user.
     if (
       connectedUserId &&
       requestedId !== connectedUserId
     ) {
       console.warn(
-        `[Socket.IO] Rejected mismatched user_join from ${socket.id}`
+        `[Socket.IO] Rejected mismatched user_join: ${socket.id}`
       );
 
       return;
     }
 
-    // Legacy clients without handshake authentication.
-    // WARNING: this compatibility path trusts a client-supplied ID.
     if (!connectedUserId) {
       connectedUserId = requestedId;
       socket.data.userId = requestedId;
@@ -270,12 +332,27 @@ io.on("connection", (socket) => {
   });
 
   // Join a conversation room.
-  // The conversation controller must also verify membership
-  // before emitting private messages to a conversation room.
+  // IMPORTANT: the conversation membership should be verified
+  // against the database before allowing private-room access.
   socket.on("join_room", (roomId, callback) => {
     if (!roomId) {
       if (typeof callback === "function") {
-        callback({ success: false, message: "Missing room ID" });
+        callback({
+          success: false,
+          message: "Missing room ID",
+        });
+      }
+
+      return;
+    }
+
+    // Do not allow an unauthenticated socket to join arbitrary rooms.
+    if (!connectedUserId) {
+      if (typeof callback === "function") {
+        callback({
+          success: false,
+          message: "Authentication required",
+        });
       }
 
       return;
@@ -286,7 +363,10 @@ io.on("connection", (socket) => {
     socket.join(normalizedRoomId);
 
     if (typeof callback === "function") {
-      callback({ success: true, roomId: normalizedRoomId });
+      callback({
+        success: true,
+        roomId: normalizedRoomId,
+      });
     }
   });
 
@@ -295,7 +375,6 @@ io.on("connection", (socket) => {
 
     const normalizedRoomId = String(roomId);
 
-    // Do not allow leaving the private user room.
     if (
       connectedUserId &&
       normalizedRoomId === connectedUserId
@@ -306,24 +385,30 @@ io.on("connection", (socket) => {
     socket.leave(normalizedRoomId);
 
     if (typeof callback === "function") {
-      callback({ success: true, roomId: normalizedRoomId });
+      callback({
+        success: true,
+        roomId: normalizedRoomId,
+      });
     }
   });
 
-  // Log transport upgrades. This helps identify polling-only clients.
   socket.conn.on("upgrade", (transport) => {
     console.log(
-      `[Socket.IO] Transport upgraded for ${socket.id}: ${transport.name}`
+      `[Socket.IO] Transport upgraded for ${socket.id}: ` +
+      transport.name
     );
   });
 
   socket.on("disconnect", (reason) => {
     if (connectedUserId) {
-      removeActiveSocket(connectedUserId, socket.id);
+      removeActiveSocket(
+        connectedUserId,
+        socket.id
+      );
 
       console.log(
-        `[Socket.IO] User ${connectedUserId} disconnected: ${reason}; ` +
-        `connected for ${Date.now() - connectedAt}ms`
+        `[Socket.IO] User ${connectedUserId} disconnected: ` +
+        `${reason}; connected for ${Date.now() - connectedAt}ms`
       );
     } else {
       console.log(
@@ -340,7 +425,6 @@ io.on("connection", (socket) => {
   });
 });
 
-// Diagnose failed Engine.IO handshakes and transport problems.
 io.engine.on("connection_error", (error) => {
   console.error("[Socket.IO] Connection error:", {
     code: error.code,
@@ -395,7 +479,9 @@ fs.mkdirSync(uploadsDir, { recursive: true });
 // EXPRESS MIDDLEWARE
 // =====================================================
 
+// Keep CORS before routes so it can handle preflight requests.
 app.use(cors(corsOptions));
+
 app.use(cookieParser());
 
 app.use(express.json({ limit: "50mb" }));
@@ -416,9 +502,15 @@ app.use(
   express.static(uploadsDir, {
     index: false,
     dotfiles: "deny",
-    maxAge: process.env.NODE_ENV === "production" ? "1d" : 0,
+    maxAge:
+      process.env.NODE_ENV === "production"
+        ? "1d"
+        : 0,
     setHeaders(res) {
-      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader(
+        "X-Content-Type-Options",
+        "nosniff"
+      );
     },
   })
 );
@@ -432,6 +524,7 @@ app.get("/api/health", (req, res) => {
     success: true,
     message: "API is working",
     realtime: "Socket.IO initialized",
+    environment: process.env.NODE_ENV || "development",
     timestamp: new Date().toISOString(),
     socket: getSocketStats(),
   });
@@ -450,28 +543,41 @@ app.get("/health", (req, res) => {
 // ATTENDANCE EMAILS
 // =====================================================
 
-app.post("/api/send-attendance-reminders", async (req, res) => {
-  try {
-    console.log("[Attendance Email] Manual sending started.");
+app.post(
+  "/api/send-attendance-reminders",
+  async (req, res) => {
+    try {
+      console.log(
+        "[Attendance Email] Manual sending started."
+      );
 
-    const result = await sendDailyAttendanceEmails();
+      const result = await sendDailyAttendanceEmails();
 
-    console.log("[Attendance Email] Completed:", result);
+      console.log(
+        "[Attendance Email] Completed:",
+        result
+      );
 
-    return res.status(200).json({
-      success: true,
-      message: "Attendance reminder emails sent successfully.",
-      result,
-    });
-  } catch (error) {
-    console.error("[Attendance Email] Error:", error);
+      return res.status(200).json({
+        success: true,
+        message:
+          "Attendance reminder emails sent successfully.",
+        result,
+      });
+    } catch (error) {
+      console.error(
+        "[Attendance Email] Error:",
+        error
+      );
 
-    return res.status(500).json({
-      success: false,
-      message: "Failed to send attendance reminder emails.",
-    });
+      return res.status(500).json({
+        success: false,
+        message:
+          "Failed to send attendance reminder emails.",
+      });
+    }
   }
-});
+);
 
 // =====================================================
 // API ROUTES
@@ -515,6 +621,10 @@ for (const [prefix, routePath] of routes) {
 // =====================================================
 
 app.use((req, res) => {
+  console.warn(
+    `[404] ${req.method} ${req.originalUrl}`
+  );
+
   res.status(404).json({
     success: false,
     message: `Route ${req.originalUrl} not found`,
@@ -526,7 +636,15 @@ app.use((req, res) => {
 // =====================================================
 
 app.use((error, req, res, next) => {
-  console.error("[Server Error]", error);
+  console.error("[Server Error]", {
+    method: req.method,
+    url: req.originalUrl,
+    message: error.message,
+    stack:
+      process.env.NODE_ENV === "production"
+        ? undefined
+        : error.stack,
+  });
 
   if (res.headersSent) {
     return next(error);
@@ -547,7 +665,7 @@ app.use((error, req, res, next) => {
   if (error.message === "Not allowed by CORS") {
     return res.status(403).json({
       success: false,
-      message: "Origin is not allowed.",
+      message: "Origin is not allowed by CORS.",
     });
   }
 
@@ -576,7 +694,9 @@ const startAttendanceScheduler = () => {
       processAttendanceNotifications,
     } = require("./controllers/attendanceController");
 
-    if (typeof processAttendanceNotifications !== "function") {
+    if (
+      typeof processAttendanceNotifications !== "function"
+    ) {
       console.warn(
         "[Attendance] Processing function unavailable."
       );
@@ -605,15 +725,24 @@ const startAttendanceScheduler = () => {
       if (shuttingDown) return;
 
       try {
-        const result = await processAttendanceNotifications();
+        const result =
+          await processAttendanceNotifications();
 
-        console.log("[Attendance] Scheduler completed:", result);
+        console.log(
+          "[Attendance] Scheduler completed:",
+          result
+        );
       } catch (error) {
-        console.error("[Attendance] Scheduler error:", error);
+        console.error(
+          "[Attendance] Scheduler error:",
+          error
+        );
       }
     }, 60 * 1000);
 
-    console.log("[Attendance] Scheduler started (60 seconds).");
+    console.log(
+      "[Attendance] Scheduler started (60 seconds)."
+    );
   } catch (error) {
     console.error(
       "[Attendance] Failed to start scheduler:",
@@ -628,7 +757,9 @@ const startAttendanceScheduler = () => {
 
 const startAttendanceEmailSchedulerSafe = () => {
   try {
-    if (typeof startAttendanceEmailScheduler !== "function") {
+    if (
+      typeof startAttendanceEmailScheduler !== "function"
+    ) {
       console.warn(
         "[Attendance Email] Scheduler unavailable."
       );
@@ -641,7 +772,9 @@ const startAttendanceEmailSchedulerSafe = () => {
     startAttendanceEmailScheduler();
     attendanceEmailSchedulerStarted = true;
 
-    console.log("[Attendance Email] Scheduler started.");
+    console.log(
+      "[Attendance Email] Scheduler started."
+    );
   } catch (error) {
     console.error(
       "[Attendance Email] Scheduler startup failed:",
@@ -662,7 +795,9 @@ const stopAttendanceEmailSchedulerSafe = () => {
     stopAttendanceEmailScheduler();
     attendanceEmailSchedulerStarted = false;
 
-    console.log("[Attendance Email] Scheduler stopped.");
+    console.log(
+      "[Attendance Email] Scheduler stopped."
+    );
   } catch (error) {
     console.error(
       "[Attendance Email] Scheduler shutdown failed:",
@@ -681,24 +816,9 @@ const startServer = async () => {
 
     if (shuttingDown) return;
 
-    console.log("[Database] MongoDB connection established.");
-
-    server.listen(PORT, () => {
-      serverStarted = true;
-
-      console.log(`[Server] Running on port ${PORT}`);
-
-      console.log(
-        `[Environment] ${process.env.NODE_ENV || "development"}`
-      );
-
-      console.log(
-        "[Socket.IO] Real-time server initialized."
-      );
-
-      startAttendanceScheduler();
-      startAttendanceEmailSchedulerSafe();
-    });
+    console.log(
+      "[Database] MongoDB connection established."
+    );
 
     server.on("error", (error) => {
       console.error("[Server] HTTP server error:", error);
@@ -709,10 +829,32 @@ const startServer = async () => {
         );
       }
     });
+
+    server.listen(PORT, "0.0.0.0", () => {
+      serverStarted = true;
+
+      console.log(`[Server] Running on port ${PORT}`);
+
+      console.log(
+        `[Environment] ${process.env.NODE_ENV || "development"}`
+      );
+
+      console.log(
+        "[CORS] Allowed origins:",
+        [...allowedOrigins]
+      );
+
+      console.log(
+        "[Socket.IO] Real-time server initialized."
+      );
+
+      startAttendanceScheduler();
+      startAttendanceEmailSchedulerSafe();
+    });
   } catch (error) {
     console.error(
       "[Server] Failed to start:",
-      error.message
+      error.stack || error.message
     );
 
     process.exitCode = 1;
@@ -740,7 +882,10 @@ const shutdown = async (signal) => {
   stopAttendanceEmailSchedulerSafe();
 
   const forceShutdownTimer = setTimeout(() => {
-    console.error("[Server] Forced shutdown after timeout.");
+    console.error(
+      "[Server] Forced shutdown after timeout."
+    );
+
     process.exit(1);
   }, 10000);
 
@@ -756,7 +901,9 @@ const shutdown = async (signal) => {
               error.message
             );
           } else {
-            console.log("[Server] HTTP server closed.");
+            console.log(
+              "[Server] HTTP server closed."
+            );
           }
 
           resolve();
@@ -770,11 +917,16 @@ const shutdown = async (signal) => {
 
     const { closeMongoDB } = require("./config/db");
 
-    await closeMongoDB();
+    if (typeof closeMongoDB === "function") {
+      await closeMongoDB();
+    }
 
     clearTimeout(forceShutdownTimer);
 
-    console.log("[Server] Shutdown completed.");
+    console.log(
+      "[Server] Shutdown completed."
+    );
+
     process.exit(0);
   } catch (error) {
     console.error(
@@ -809,5 +961,9 @@ process.on("uncaughtException", (error) => {
 
   void shutdown("uncaughtException");
 });
+
+// =====================================================
+// BOOT
+// =====================================================
 
 startServer();
