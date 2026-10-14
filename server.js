@@ -604,7 +604,6 @@ const routes = [
   ["/api/media", "./routes/mediaRoutes"],
   ["/api/files", "./routes/mediaRoutes"],
   ["/api/campaigns", "./routes/campaignRoutes"],
-  ["/api/marketing", "./routes/marketingRoutes"],
   ["/api/ai-agents", "./routes/agentRoutes"],
   ["/api/agents", "./routes/agentRoutes"],
   ["/api/analytics", "./routes/analyticsRoutes"],
