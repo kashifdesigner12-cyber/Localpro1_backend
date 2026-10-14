@@ -1,4 +1,4 @@
-const express = require('express');
+const express = require("express");
 
 const {
   getMessages,
@@ -10,11 +10,11 @@ const {
   markSingleMessageAsRead,
   deleteMessage,
   deleteMessageForMe,
-  deleteMessageForEveryone
-} = require('../controllers/messageController');
+  deleteMessageForEveryone,
+} = require("../controllers/messageController");
 
-const { protect } = require('../middleware/authMiddleware');
-const upload = require('../middleware/uploadMiddleware');
+const { protect } = require("../middleware/authMiddleware");
+const upload = require("../middleware/uploadMiddleware");
 
 const router = express.Router();
 
@@ -22,96 +22,98 @@ const router = express.Router();
 |--------------------------------------------------------------------------
 | Authentication
 |--------------------------------------------------------------------------
-| All message endpoints require an authenticated user.
+| Every message route requires authentication.
 */
 router.use(protect);
 
 /*
 |--------------------------------------------------------------------------
-| Unread count
+| Unread message count
 |--------------------------------------------------------------------------
-| Keep static routes before dynamic /:conversationId routes.
 */
-router.get('/unread-count', getUnreadMessageCount);
-router.get('/unread', getUnreadMessageCount);
+router.get("/unread-count", getUnreadMessageCount);
+router.get("/unread", getUnreadMessageCount);
+
+/*
+|--------------------------------------------------------------------------
+| Message details
+|--------------------------------------------------------------------------
+| These static routes must be declared before generic ID routes.
+*/
+router.get("/single/:id", getMessageById);
+router.get("/detail/:id", getMessageById);
 
 /*
 |--------------------------------------------------------------------------
 | Send message
 |--------------------------------------------------------------------------
-| Supports text messages and uploaded attachments.
-| The controller should emit the Socket.IO event immediately after saving
-| the message, without waiting for notifications or email.
+| Main frontend endpoint:
+| POST /api/messages
+|
+| Legacy-compatible endpoint:
+| POST /api/messages/send
+|
+| Both endpoints use the same controller. The frontend should call
+| only one endpoint per send action.
 */
-router.post('/', upload.any(), sendMessage);
-router.post('/send', upload.any(), sendMessage);
+router.post("/", upload.any(), sendMessage);
+router.post("/send", upload.any(), sendMessage);
 
 /*
 |--------------------------------------------------------------------------
 | Mark messages as read
 |--------------------------------------------------------------------------
 */
-router.put('/messages/:messageId/read', markSingleMessageAsRead);
-router.patch('/messages/:messageId/read', markSingleMessageAsRead);
-
-router.put('/read/:conversationId', markMessagesAsRead);
-router.patch('/read/:conversationId', markMessagesAsRead);
+router.put("/read/:conversationId", markMessagesAsRead);
+router.patch("/read/:conversationId", markMessagesAsRead);
 
 /*
 |--------------------------------------------------------------------------
-| Single message details
+| Mark one message as read
 |--------------------------------------------------------------------------
-| Explicit paths avoid conflicts with /:conversationId.
 */
-router.get('/single/:id', getMessageById);
-router.get('/detail/:id', getMessageById);
+router.put("/messages/:messageId/read", markSingleMessageAsRead);
+router.patch("/messages/:messageId/read", markSingleMessageAsRead);
+
+router.put("/:id/read", markSingleMessageAsRead);
+router.patch("/:id/read", markSingleMessageAsRead);
 
 /*
 |--------------------------------------------------------------------------
-| Delete message for current user
+| Delete message for the current user
 |--------------------------------------------------------------------------
 */
-router.post('/:id/delete-for-me', deleteMessageForMe);
-router.patch('/:id/delete-for-me', deleteMessageForMe);
-router.delete('/:id/me', deleteMessageForMe);
+router.post("/:id/delete-for-me", deleteMessageForMe);
+router.patch("/:id/delete-for-me", deleteMessageForMe);
+router.delete("/:id/me", deleteMessageForMe);
 
 /*
 |--------------------------------------------------------------------------
 | Delete message for everyone
 |--------------------------------------------------------------------------
 */
-router.post('/:id/delete-for-everyone', deleteMessageForEveryone);
-router.patch('/:id/delete-for-everyone', deleteMessageForEveryone);
-router.delete('/:id/everyone', deleteMessageForEveryone);
+router.post("/:id/delete-for-everyone", deleteMessageForEveryone);
+router.patch("/:id/delete-for-everyone", deleteMessageForEveryone);
+router.delete("/:id/everyone", deleteMessageForEveryone);
 
 /*
 |--------------------------------------------------------------------------
-| Update message read status
-|--------------------------------------------------------------------------
-| These routes must come before the generic conversation route.
-*/
-router.put('/:id/read', markSingleMessageAsRead);
-router.patch('/:id/read', markSingleMessageAsRead);
-
-/*
-|--------------------------------------------------------------------------
-| Get conversation messages
+| Get messages for a conversation
 |--------------------------------------------------------------------------
 | GET /api/messages/:conversationId
 |
-| Note: /:conversationId and /:id have the same URL pattern.
-| Therefore, a generic GET /:id route cannot independently handle
-| getMessageById. Use /single/:id or /detail/:id for message details.
+| Note: Message details use /single/:id or /detail/:id because a generic
+| /:id route cannot distinguish a message ID from a conversation ID.
 */
-router.get('/:conversationId', getMessages);
+router.get("/:conversationId", getMessages);
 
 /*
 |--------------------------------------------------------------------------
-| Update and delete a message
+| Update or delete a message
 |--------------------------------------------------------------------------
 */
-router.put('/:id', updateMessage);
-router.patch('/:id', updateMessage);
-router.delete('/:id', deleteMessage);
+router.put("/:id", updateMessage);
+router.patch("/:id", updateMessage);
+router.delete("/:id", deleteMessage);
 
 module.exports = router;

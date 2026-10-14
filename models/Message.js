@@ -49,18 +49,24 @@ const MessageSchema = new mongoose.Schema(
         },
         filename: {
           type: String,
+          default: "",
         },
         originalName: {
           type: String,
+          default: "",
         },
         fileType: {
           type: String,
+          default: "",
         },
         mimeType: {
           type: String,
+          default: "",
         },
         size: {
           type: Number,
+          default: 0,
+          min: 0,
         },
       },
     ],
@@ -121,33 +127,57 @@ const MessageSchema = new mongoose.Schema(
   }
 );
 
+/**
+ * Keep body and message synchronized.
+ * Allow attachment-only messages.
+ */
 MessageSchema.pre("validate", function (next) {
   if (this.isDeletedForEveryone) {
     return next();
   }
 
-  const hasBody = Boolean(this.body && String(this.body).trim().length > 0);
-  const hasMessage = Boolean(this.message && String(this.message).trim().length > 0);
-  const hasAttachments = Boolean(
-    Array.isArray(this.attachments) && this.attachments.length > 0
-  );
+  const normalizedBody =
+    typeof this.body === "string" ? this.body.trim() : "";
 
-  if (!hasBody && !hasMessage && !hasAttachments) {
-    this.invalidate("body", "Message text or an attachment file is required.");
+  const normalizedMessage =
+    typeof this.message === "string" ? this.message.trim() : "";
+
+  const hasAttachments =
+    Array.isArray(this.attachments) && this.attachments.length > 0;
+
+  if (normalizedBody && !normalizedMessage) {
+    this.message = normalizedBody;
+  } else if (normalizedMessage && !normalizedBody) {
+    this.body = normalizedMessage;
+  } else if (normalizedBody && normalizedMessage) {
+    // Prefer body as the canonical text when both fields are supplied.
+    this.body = normalizedBody;
+    this.message = normalizedBody;
   }
 
-  if (hasBody && !hasMessage) {
-    this.message = this.body;
-  } else if (hasMessage && !hasBody) {
-    this.body = this.message;
+  const hasText = Boolean(
+    (this.body && this.body.trim()) ||
+    (this.message && this.message.trim())
+  );
+
+  if (!hasText && !hasAttachments) {
+    this.invalidate(
+      "body",
+      "Message text or at least one attachment is required."
+    );
   }
 
   next();
 });
 
+/**
+ * Query indexes.
+ * These improve reads but intentionally do not enforce uniqueness:
+ * users may legitimately send the same text more than once.
+ */
 MessageSchema.index({ conversation: 1, createdAt: 1 });
 MessageSchema.index({ recipient: 1, isRead: 1 });
 MessageSchema.index({ sender: 1, createdAt: -1 });
-MessageSchema.index({ conversation: 1, deletedFor: 1 }); // Optimized for deleted-for queries
+MessageSchema.index({ conversation: 1, deletedFor: 1 });
 
 module.exports = mongoose.model("Message", MessageSchema);
