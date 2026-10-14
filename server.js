@@ -1,4 +1,3 @@
-
 "use strict";
 
 // =====================================================
@@ -6,14 +5,6 @@
 // =====================================================
 
 require("dotenv").config();
-
-const dns = require("dns");
-
-dns.setServers(["1.1.1.1", "8.8.8.8"]);
-
-// =====================================================
-// IMPORTS
-// =====================================================
 
 const http = require("http");
 const path = require("path");
@@ -55,7 +46,10 @@ const allowedOrigins = new Set([
 if (process.env.FRONTEND_URL) {
   for (const origin of process.env.FRONTEND_URL.split(",")) {
     const normalized = normalizeOrigin(origin.trim());
-    if (normalized) allowedOrigins.add(normalized);
+
+    if (normalized) {
+      allowedOrigins.add(normalized);
+    }
   }
 }
 
@@ -79,6 +73,7 @@ const corsOrigin = (origin, callback) => {
   }
 
   console.warn(`[CORS] Blocked origin: ${origin}`);
+
   return callback(new Error("Not allowed by CORS"));
 };
 
@@ -97,7 +92,7 @@ const corsOptions = {
 };
 
 // =====================================================
-// SOCKET.IO - REAL-TIME FOUNDATION
+// SOCKET.IO - REAL-TIME CONFIGURATION
 // =====================================================
 
 const io = new Server(server, {
@@ -106,18 +101,34 @@ const io = new Server(server, {
     credentials: true,
     methods: ["GET", "POST"],
   },
+
+  // Prefer WebSocket, retain polling as a fallback.
   transports: ["websocket", "polling"],
-  pingInterval: 10000,
+
+  // Connection health settings.
+  pingInterval: 25000,
   pingTimeout: 20000,
   connectTimeout: 20000,
+
+  // Allow message/file payloads up to 5 MB over Socket.IO.
+  // HTTP upload limits are configured separately.
   maxHttpBufferSize: 5e6,
+
+  // Restore socket rooms and missed packets after a short
+  // disconnection when supported by the Socket.IO adapter.
+  connectionStateRecovery: {
+    maxDisconnectionDuration: 120000,
+    skipMiddlewares: false,
+  },
 });
 
 app.set("io", io);
 
-// Map: userId -> Set of connected socket IDs.
-// Supports multiple browser tabs and devices.
+// userId -> Set of connected socket IDs.
+// Supports multiple tabs and devices.
 const activeUsers = new Map();
+
+app.set("activeUsers", activeUsers);
 
 function addActiveSocket(userId, socketId) {
   const id = String(userId);
@@ -137,7 +148,7 @@ function removeActiveSocket(userId, socketId) {
 
   sockets.delete(socketId);
 
-  // Mark offline only when the last socket disconnects.
+  // A user is offline only when their last connection closes.
   if (sockets.size === 0) {
     activeUsers.delete(id);
 
@@ -148,17 +159,34 @@ function removeActiveSocket(userId, socketId) {
   }
 }
 
-// Make Socket.IO and active connection tracking available
-// to controllers through Express.
-app.set("activeUsers", activeUsers);
+function getSocketStats() {
+  let connectedSockets = 0;
+
+  for (const sockets of activeUsers.values()) {
+    connectedSockets += sockets.size;
+  }
+
+  return {
+    connectedUsers: activeUsers.size,
+    connectedSockets,
+    transportConnections: io.engine.clientsCount,
+  };
+}
+
+// =====================================================
+// SOCKET.IO CONNECTION HANDLING
+// =====================================================
 
 io.on("connection", (socket) => {
-  console.log(`[Socket.IO] Connected: ${socket.id}`);
+  const connectedAt = Date.now();
+
+  console.log(
+    `[Socket.IO] Connected: ${socket.id}; transport=${socket.conn.transport.name}`
+  );
 
   let connectedUserId = null;
 
-  // Try authenticating the socket with the existing JWT.
-  // Frontend can provide auth: { token: "..." }.
+  // Authenticate using the existing JWT token format.
   try {
     const authorization =
       socket.handshake.headers?.authorization || "";
@@ -179,7 +207,9 @@ io.on("connection", (socket) => {
         connectedUserId = String(userId);
         socket.data.userId = connectedUserId;
 
+        // Every authenticated socket joins its private user room.
         socket.join(connectedUserId);
+
         addActiveSocket(connectedUserId, socket.id);
 
         io.emit("update_user_status", {
@@ -188,40 +218,42 @@ io.on("connection", (socket) => {
         });
 
         console.log(
-          `[Socket.IO] Auto-joined user room: ${connectedUserId}`
+          `[Socket.IO] Authenticated user ${connectedUserId} joined private room`
         );
       }
     }
   } catch (error) {
     console.warn(
-      "[Socket.IO] Token verification failed; awaiting user_join."
+      `[Socket.IO] Authentication failed for ${socket.id}: ${error.message}`
     );
   }
 
-  // Compatibility with the existing frontend.
+  // Legacy compatibility with existing clients.
+  // Remove unauthenticated identity assignment after all clients
+  // reliably send a valid JWT during the Socket.IO handshake.
   socket.on("user_join", (userId) => {
     if (!userId) return;
 
     const requestedId = String(userId);
 
-    // An authenticated socket cannot change its identity.
+    // An authenticated socket cannot impersonate another user.
     if (
       connectedUserId &&
       requestedId !== connectedUserId
     ) {
       console.warn(
-        `[Socket.IO] Rejected mismatched user_join: ${socket.id}`
+        `[Socket.IO] Rejected mismatched user_join from ${socket.id}`
       );
+
       return;
     }
 
-    // Legacy compatibility: existing clients may send user_join
-    // without providing a JWT in the handshake.
-    // Replace this fallback with mandatory authentication
-    // after the frontend is updated.
+    // Legacy clients without handshake authentication.
+    // WARNING: this compatibility path trusts a client-supplied ID.
     if (!connectedUserId) {
       connectedUserId = requestedId;
       socket.data.userId = requestedId;
+
       addActiveSocket(requestedId, socket.id);
     }
 
@@ -233,35 +265,56 @@ io.on("connection", (socket) => {
     });
 
     console.log(
-      `[Socket.IO] User online & joined room: ${connectedUserId}`
+      `[Socket.IO] User ${connectedUserId} joined private room`
     );
   });
 
-  // Keep the existing join_room event for compatibility.
-  // IMPORTANT: authorize conversation membership before allowing
-  // arbitrary room joins in a production messaging system.
-  socket.on("join_room", (roomId) => {
-    if (!roomId) return;
+  // Join a conversation room.
+  // The conversation controller must also verify membership
+  // before emitting private messages to a conversation room.
+  socket.on("join_room", (roomId, callback) => {
+    if (!roomId) {
+      if (typeof callback === "function") {
+        callback({ success: false, message: "Missing room ID" });
+      }
 
-    socket.join(String(roomId));
+      return;
+    }
 
-    console.log(
-      `[Socket.IO] Socket ${socket.id} joined room: ${roomId}`
-    );
+    const normalizedRoomId = String(roomId);
+
+    socket.join(normalizedRoomId);
+
+    if (typeof callback === "function") {
+      callback({ success: true, roomId: normalizedRoomId });
+    }
   });
 
-  socket.on("leave_room", (roomId) => {
+  socket.on("leave_room", (roomId, callback) => {
     if (!roomId) return;
 
-    // Do not leave the user's own private room.
+    const normalizedRoomId = String(roomId);
+
+    // Do not allow leaving the private user room.
     if (
       connectedUserId &&
-      String(roomId) === connectedUserId
+      normalizedRoomId === connectedUserId
     ) {
       return;
     }
 
-    socket.leave(String(roomId));
+    socket.leave(normalizedRoomId);
+
+    if (typeof callback === "function") {
+      callback({ success: true, roomId: normalizedRoomId });
+    }
+  });
+
+  // Log transport upgrades. This helps identify polling-only clients.
+  socket.conn.on("upgrade", (transport) => {
+    console.log(
+      `[Socket.IO] Transport upgraded for ${socket.id}: ${transport.name}`
+    );
   });
 
   socket.on("disconnect", (reason) => {
@@ -269,17 +322,30 @@ io.on("connection", (socket) => {
       removeActiveSocket(connectedUserId, socket.id);
 
       console.log(
-        `[Socket.IO] Disconnected user ${connectedUserId}: ${reason}`
+        `[Socket.IO] User ${connectedUserId} disconnected: ${reason}; ` +
+        `connected for ${Date.now() - connectedAt}ms`
       );
     } else {
       console.log(
-        `[Socket.IO] Disconnected: ${socket.id} (${reason})`
+        `[Socket.IO] Disconnected: ${socket.id}; reason=${reason}`
       );
     }
   });
 
   socket.on("error", (error) => {
-    console.error("[Socket.IO] Socket error:", error.message);
+    console.error(
+      `[Socket.IO] Error on ${socket.id}:`,
+      error.message
+    );
+  });
+});
+
+// Diagnose failed Engine.IO handshakes and transport problems.
+io.engine.on("connection_error", (error) => {
+  console.error("[Socket.IO] Connection error:", {
+    code: error.code,
+    message: error.message,
+    context: error.context,
   });
 });
 
@@ -308,7 +374,9 @@ const loadRouter = (routePath) => {
     return routeModule.default;
   }
 
-  console.error(`[Server] Invalid router export from ${routePath}`);
+  console.error(
+    `[Server] Invalid router export from ${routePath}`
+  );
 
   throw new TypeError(
     `Route file ${routePath} does not export an Express router.`
@@ -365,6 +433,7 @@ app.get("/api/health", (req, res) => {
     message: "API is working",
     realtime: "Socket.IO initialized",
     timestamp: new Date().toISOString(),
+    socket: getSocketStats(),
   });
 });
 
@@ -373,6 +442,7 @@ app.get("/health", (req, res) => {
     success: true,
     message: "Backend is running",
     timestamp: new Date().toISOString(),
+    socket: getSocketStats(),
   });
 });
 
@@ -428,7 +498,7 @@ const routes = [
   ["/api/media", "./routes/mediaRoutes"],
   ["/api/files", "./routes/mediaRoutes"],
   ["/api/campaigns", "./routes/campaignRoutes"],
-  ["/api/marketing", "./routes/campaignRoutes"],
+  ["/api/marketing", "./routes/marketingRoutes"],
   ["/api/ai-agents", "./routes/agentRoutes"],
   ["/api/agents", "./routes/agentRoutes"],
   ["/api/analytics", "./routes/analyticsRoutes"],
@@ -507,13 +577,14 @@ const startAttendanceScheduler = () => {
     } = require("./controllers/attendanceController");
 
     if (typeof processAttendanceNotifications !== "function") {
-      console.warn("[Attendance] Processing function unavailable.");
+      console.warn(
+        "[Attendance] Processing function unavailable."
+      );
+
       return;
     }
 
-    if (attendanceScheduler) {
-      return;
-    }
+    if (attendanceScheduler) return;
 
     Promise.resolve()
       .then(() => processAttendanceNotifications())
@@ -544,7 +615,10 @@ const startAttendanceScheduler = () => {
 
     console.log("[Attendance] Scheduler started (60 seconds).");
   } catch (error) {
-    console.error("[Attendance] Failed to start scheduler:", error);
+    console.error(
+      "[Attendance] Failed to start scheduler:",
+      error
+    );
   }
 };
 
@@ -555,13 +629,14 @@ const startAttendanceScheduler = () => {
 const startAttendanceEmailSchedulerSafe = () => {
   try {
     if (typeof startAttendanceEmailScheduler !== "function") {
-      console.warn("[Attendance Email] Scheduler unavailable.");
+      console.warn(
+        "[Attendance Email] Scheduler unavailable."
+      );
+
       return;
     }
 
-    if (attendanceEmailSchedulerStarted) {
-      return;
-    }
+    if (attendanceEmailSchedulerStarted) return;
 
     startAttendanceEmailScheduler();
     attendanceEmailSchedulerStarted = true;
@@ -604,9 +679,7 @@ const startServer = async () => {
   try {
     await connectDB();
 
-    if (shuttingDown) {
-      return;
-    }
+    if (shuttingDown) return;
 
     console.log("[Database] MongoDB connection established.");
 
@@ -620,7 +693,7 @@ const startServer = async () => {
       );
 
       console.log(
-        "[Socket.IO] Real-server initialized with speed optimizations."
+        "[Socket.IO] Real-time server initialized."
       );
 
       startAttendanceScheduler();
@@ -631,11 +704,17 @@ const startServer = async () => {
       console.error("[Server] HTTP server error:", error);
 
       if (error.code === "EADDRINUSE") {
-        console.error(`[Server] Port ${PORT} is already in use.`);
+        console.error(
+          `[Server] Port ${PORT} is already in use.`
+        );
       }
     });
   } catch (error) {
-    console.error("[Server] Failed to start:", error.message);
+    console.error(
+      "[Server] Failed to start:",
+      error.message
+    );
+
     process.exitCode = 1;
   }
 };
@@ -645,13 +724,13 @@ const startServer = async () => {
 // =====================================================
 
 const shutdown = async (signal) => {
-  if (shuttingDown) {
-    return;
-  }
+  if (shuttingDown) return;
 
   shuttingDown = true;
 
-  console.log(`[Server] ${signal} received. Shutting down...`);
+  console.log(
+    `[Server] ${signal} received. Shutting down...`
+  );
 
   if (attendanceScheduler) {
     clearInterval(attendanceScheduler);
@@ -690,6 +769,7 @@ const shutdown = async (signal) => {
     });
 
     const { closeMongoDB } = require("./config/db");
+
     await closeMongoDB();
 
     clearTimeout(forceShutdownTimer);
@@ -697,7 +777,11 @@ const shutdown = async (signal) => {
     console.log("[Server] Shutdown completed.");
     process.exit(0);
   } catch (error) {
-    console.error("[Server] Shutdown error:", error.message);
+    console.error(
+      "[Server] Shutdown error:",
+      error.message
+    );
+
     process.exit(1);
   }
 };
@@ -711,11 +795,18 @@ process.on("SIGTERM", () => {
 });
 
 process.on("unhandledRejection", (reason) => {
-  console.error("[Process] Unhandled promise rejection:", reason);
+  console.error(
+    "[Process] Unhandled promise rejection:",
+    reason
+  );
 });
 
 process.on("uncaughtException", (error) => {
-  console.error("[Process] Uncaught exception:", error);
+  console.error(
+    "[Process] Uncaught exception:",
+    error
+  );
+
   void shutdown("uncaughtException");
 });
 
