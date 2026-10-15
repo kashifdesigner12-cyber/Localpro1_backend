@@ -1,50 +1,21 @@
 const mongoose = require('mongoose');
 const Notification = require('../models/Notification');
 
+const VALID_TYPES = [
+  'task', 'message', 'mention', 'alert', 'leave',
+  'system', 'appointment', 'call', 'event', 'attendance'
+];
+
+const VALID_RELATED_TYPES = [
+  'Task', 'Message', 'LeaveRequest', 'User', 'System',
+  'Call', 'Appointment', 'Event', 'Attendance'
+];
+
 const isValidObjectId = (id) =>
   Boolean(id) && mongoose.Types.ObjectId.isValid(id);
 
-// ============================================================
-// VALID NOTIFICATION TYPES
-// ============================================================
-
-const VALID_TYPES = [
-  'task',
-  'message',
-  'mention',
-  'alert',
-  'leave',
-  'system',
-  'appointment',
-  'call',
-  'event',
-  'attendance'
-];
-
-// ============================================================
-// VALID RELATED TYPES
-// ============================================================
-
-const VALID_RELATED_TYPES = [
-  'Task',
-  'Message',
-  'LeaveRequest',
-  'User',
-  'System',
-  'Call',
-  'Appointment',
-  'Event',
-  'Attendance'
-];
-
-// ============================================================
-// SAFE NOTIFICATION RESPONSE
-// ============================================================
-
 const safeNotification = (notification) => {
-  if (!notification) {
-    return null;
-  }
+  if (!notification) return null;
 
   return {
     id: notification._id,
@@ -59,13 +30,51 @@ const safeNotification = (notification) => {
     actionUrl: notification.actionUrl || '',
     metadata: notification.metadata || {},
     createdAt: notification.createdAt,
-    updatedAt: notification.updatedAt
+    updatedAt: notification.updatedAt,
   };
 };
 
-// ============================================================
-// INTERNAL CREATE NOTIFICATION
-// ============================================================
+const normalizeNotificationPayload = (
+  paramsOrUserId,
+  argType,
+  argTitle,
+  argMessage,
+  argRelatedId,
+  argRelatedType,
+  argActionUrl,
+  argMetadata
+) => {
+  if (
+    paramsOrUserId &&
+    typeof paramsOrUserId === 'object' &&
+    !paramsOrUserId._bsontype &&
+    !paramsOrUserId._id
+  ) {
+    return {
+      user: paramsOrUserId.userId || paramsOrUserId.user || null,
+      type: paramsOrUserId.type || 'system',
+      title: paramsOrUserId.title || '',
+      message: paramsOrUserId.message || '',
+      relatedId: paramsOrUserId.relatedId || null,
+      relatedType: paramsOrUserId.relatedType || null,
+      actionUrl: paramsOrUserId.actionUrl || '',
+      metadata: paramsOrUserId.metadata || {},
+    };
+  }
+
+  return {
+    user: paramsOrUserId && paramsOrUserId._id
+      ? paramsOrUserId._id
+      : paramsOrUserId,
+    type: argType || 'system',
+    title: argTitle || '',
+    message: argMessage || '',
+    relatedId: argRelatedId || null,
+    relatedType: argRelatedType || null,
+    actionUrl: argActionUrl || '',
+    metadata: argMetadata || {},
+  };
+};
 
 const createNotification = async (
   paramsOrUserId,
@@ -78,153 +87,112 @@ const createNotification = async (
   argMetadata = {}
 ) => {
   try {
-    let payload = {};
+    const payload = normalizeNotificationPayload(
+      paramsOrUserId,
+      argType,
+      argTitle,
+      argMessage,
+      argRelatedId,
+      argRelatedType,
+      argActionUrl,
+      argMetadata
+    );
 
-    if (
-      paramsOrUserId &&
-      typeof paramsOrUserId === 'object' &&
-      !paramsOrUserId._bsontype &&
-      !paramsOrUserId._id
-    ) {
-      payload = {
-        user:
-          paramsOrUserId.userId ||
-          paramsOrUserId.user ||
-          null,
-        type:
-          paramsOrUserId.type ||
-          'system',
-        title:
-          paramsOrUserId.title ||
-          '',
-        message:
-          paramsOrUserId.message ||
-          '',
-        relatedId:
-          paramsOrUserId.relatedId ||
-          null,
-        relatedType:
-          paramsOrUserId.relatedType ||
-          null,
-        actionUrl:
-          paramsOrUserId.actionUrl ||
-          '',
-        metadata:
-          paramsOrUserId.metadata ||
-          {}
-      };
-    } else {
-      payload = {
-        user:
-          paramsOrUserId &&
-          paramsOrUserId._id
-            ? paramsOrUserId._id
-            : paramsOrUserId,
-        type: argType || 'system',
-        title: argTitle || '',
-        message: argMessage || '',
-        relatedId: argRelatedId || null,
-        relatedType: argRelatedType || null,
-        actionUrl: argActionUrl || '',
-        metadata: argMetadata || {}
-      };
-    }
-
-    if (!payload.user || !isValidObjectId(payload.user)) {
-      console.error('createNotification: invalid or missing user ID');
+    if (!isValidObjectId(payload.user)) {
+      console.warn('createNotification: invalid or missing user ID');
       return null;
     }
 
     if (!VALID_TYPES.includes(payload.type)) {
-      console.error(`createNotification: Invalid notification type "${payload.type}"`);
+      console.warn('createNotification: invalid notification type');
       return null;
     }
 
-    if (!payload.title || !String(payload.title).trim()) {
-      console.error('createNotification: title is required');
-      return null;
-    }
-
-    if (!payload.message || !String(payload.message).trim()) {
-      console.error('createNotification: message is required');
+    if (
+      typeof payload.title !== 'string' ||
+      !payload.title.trim() ||
+      typeof payload.message !== 'string' ||
+      !payload.message.trim()
+    ) {
+      console.warn('createNotification: title and message are required');
       return null;
     }
 
     if (
       payload.relatedType &&
-      !VALID_RELATED_TYPES.includes(
-        payload.relatedType
-      )
+      !VALID_RELATED_TYPES.includes(payload.relatedType)
     ) {
-      console.error(
-        `createNotification: Invalid relatedType "${payload.relatedType}"`
-      );
+      console.warn('createNotification: invalid related type');
       return null;
     }
 
-    const notification =
-      await Notification.create({
-        user: payload.user,
-        type: payload.type,
-        title: String(payload.title).trim(),
-        message: String(payload.message).trim(),
-        isRead: false,
-        relatedId: payload.relatedId,
-        relatedType: payload.relatedType,
-        actionUrl: payload.actionUrl,
-        metadata: payload.metadata
-      });
+    if (
+      payload.relatedId !== null &&
+      payload.relatedId !== undefined &&
+      !isValidObjectId(payload.relatedId)
+    ) {
+      console.warn('createNotification: invalid related ID');
+      return null;
+    }
+
+    if (
+      typeof payload.actionUrl !== 'string' ||
+      payload.actionUrl.length > 2048 ||
+      (payload.actionUrl && !payload.actionUrl.startsWith('/') &&
+        !/^https?:\/\/[^\s]+$/i.test(payload.actionUrl))
+    ) {
+      console.warn('createNotification: invalid action URL');
+      return null;
+    }
+
+    if (
+      !payload.metadata ||
+      typeof payload.metadata !== 'object' ||
+      Array.isArray(payload.metadata)
+    ) {
+      console.warn('createNotification: metadata must be an object');
+      return null;
+    }
+
+    const notification = await Notification.create({
+      user: payload.user,
+      type: payload.type,
+      title: payload.title.trim().slice(0, 200),
+      message: payload.message.trim().slice(0, 5000),
+      isRead: false,
+      readAt: null,
+      relatedId: payload.relatedId || null,
+      relatedType: payload.relatedType || null,
+      actionUrl: payload.actionUrl || '',
+      metadata: payload.metadata,
+    });
 
     return notification;
   } catch (error) {
-    console.error(
-      'createNotification error:',
-      error.message
-    );
+    console.error('createNotification error:', error.message);
     return null;
   }
 };
-
-// ============================================================
-// ATTENDANCE NOTIFICATION
-// ============================================================
 
 const createAttendanceNotification = async ({
   userId,
   attendanceId = null,
   title = 'Attendance Required',
-  message =
-    'Your attendance time has started. Please mark your attendance.',
+  message = 'Your attendance time has started. Please mark your attendance.',
   actionUrl = '/user/attendance',
-  metadata = {}
+  metadata = {},
 }) => {
-  try {
-    if (!userId) {
-      return null;
-    }
-
-    return await createNotification({
-      userId,
-      type: 'attendance',
-      title,
-      message,
-      relatedId: attendanceId,
-      relatedType: 'Attendance',
-      actionUrl,
-      metadata
-    });
-  } catch (error) {
-    console.error(
-      'createAttendanceNotification error:',
-      error.message
-    );
-    return null;
-  }
+  return createNotification({
+    userId,
+    type: 'attendance',
+    title,
+    message,
+    relatedId: attendanceId,
+    relatedType: 'Attendance',
+    actionUrl,
+    metadata,
+  });
 };
-
-// ============================================================
-// ATTENDANCE MARKED NOTIFICATION
-// ============================================================
 
 const notifyAttendanceMarked = async ({
   recipientId,
@@ -232,562 +200,232 @@ const notifyAttendanceMarked = async ({
   attendanceId = null,
   userName = 'User',
   status = 'present',
-  checkInTime = null
+  checkInTime = null,
 }) => {
-  try {
-    if (!recipientId) {
-      return null;
-    }
+  if (!recipientId) return null;
 
-    let formattedStatus =
-      String(status || 'present')
-        .toLowerCase();
-
-    if (
-      ![
-        'present',
-        'late',
-        'absent',
-        'half day',
-        'leave'
-      ].includes(
-        formattedStatus
-      )
-    ) {
-      formattedStatus =
-        'present';
-    }
-
-    return await createNotification({
-      userId: recipientId,
-      type: 'attendance',
-      title: 'Attendance Marked',
-      message: `${userName} has marked attendance as ${formattedStatus}.`,
-      relatedId: attendanceId,
-      relatedType: 'Attendance',
-      actionUrl: '/admin/attendance',
-      metadata: {
-        attendanceUserId: userId || null,
-        userName,
-        status: formattedStatus,
-        checkInTime
-      }
-    });
-  } catch (error) {
-    console.error(
-      'notifyAttendanceMarked error:',
-      error.message
-    );
-    return null;
+  let formattedStatus = String(status || 'present').toLowerCase();
+  if (!['present', 'late', 'absent', 'half day', 'leave'].includes(formattedStatus)) {
+    formattedStatus = 'present';
   }
+
+  const safeUserName = typeof userName === 'string'
+    ? userName.trim().slice(0, 120)
+    : 'User';
+
+  return createNotification({
+    userId: recipientId,
+    type: 'attendance',
+    title: 'Attendance Marked',
+    message: `${safeUserName || 'User'} has marked attendance as ${formattedStatus}.`,
+    relatedId: attendanceId,
+    relatedType: 'Attendance',
+    actionUrl: '/admin/attendance',
+    metadata: {
+      attendanceUserId: userId || null,
+      userName: safeUserName || 'User',
+      status: formattedStatus,
+      checkInTime,
+    },
+  });
 };
 
-// ============================================================
-// GET ALL NOTIFICATIONS
-// GET /api/notifications
-// ============================================================
-
-const getNotifications = async (
-  req,
-  res
-) => {
+const getNotifications = async (req, res) => {
   try {
-    const {
-      isRead,
-      type,
-      search,
-      page = 1,
-      limit = 20
-    } = req.query;
+    if (!req.user || !req.user._id) {
+      return res.status(401).json({ success: false, message: 'Authentication required.' });
+    }
 
+    const { isRead, type, search, page = 1, limit = 20 } = req.query;
     const currentUserId = req.user._id;
-
-    const filter = {
-      user: currentUserId
-    };
+    const filter = { user: currentUserId };
 
     if (isRead !== undefined) {
-      if (
-        isRead !== 'true' &&
-        isRead !== 'false'
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            'isRead must be true or false.'
-        });
+      if (isRead !== 'true' && isRead !== 'false') {
+        return res.status(400).json({ success: false, message: 'isRead must be true or false.' });
       }
-
-      filter.isRead =
-        isRead === 'true';
+      filter.isRead = isRead === 'true';
     }
 
     if (type) {
-      if (
-        !VALID_TYPES.includes(
-          type
-        )
-      ) {
+      if (typeof type !== 'string' || !VALID_TYPES.includes(type)) {
         return res.status(400).json({
           success: false,
-          message:
-            `Invalid type filter. Allowed: ${VALID_TYPES.join(', ')}.`
+          message: `Invalid type filter. Allowed: ${VALID_TYPES.join(', ')}.`,
         });
       }
-
       filter.type = type;
     }
 
-    if (
-      search &&
-      search.trim()
-    ) {
-      const regex =
-        new RegExp(
-          search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
-          'i'
-        );
-
-      filter.$or = [
-        {
-          title: regex
-        },
-        {
-          message: regex
-        }
-      ];
+    if (search !== undefined && typeof search !== 'string') {
+      return res.status(400).json({ success: false, message: 'Search must be a string.' });
     }
 
-    const pageNum =
-      Math.max(
-        1,
-        parseInt(page, 10) || 1
-      );
+    if (search && search.trim()) {
+      const escaped = search.trim().slice(0, 100).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
+      filter.$or = [{ title: regex }, { message: regex }];
+    }
 
-    const limitNum =
-      Math.min(
-        100,
-        Math.max(
-          1,
-          parseInt(limit, 10) || 20
-        )
-      );
+    const parsedPage = Number.parseInt(page, 10);
+    const parsedLimit = Number.parseInt(limit, 10);
+    const pageNum = Number.isFinite(parsedPage) && parsedPage > 0 ? Math.min(parsedPage, 1000000) : 1;
+    const limitNum = Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.min(parsedLimit, 100) : 20;
+    const skip = (pageNum - 1) * limitNum;
 
-    const skip =
-      (pageNum - 1) *
-      limitNum;
+    const [notifications, total, unreadCount] = await Promise.all([
+      Notification.find(filter)
+        .sort({ createdAt: -1, _id: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean(),
+      Notification.countDocuments(filter),
+      Notification.countDocuments({ user: currentUserId, isRead: false }),
+    ]);
 
-    const [
-      notifications,
-      total,
-      unreadCount
-    ] =
-      await Promise.all([
-        Notification.find(
-          filter
-        )
-          .sort({
-            createdAt: -1
-          })
-          .skip(skip)
-          .limit(limitNum)
-          .lean(),
-
-        Notification.countDocuments(
-          filter
-        ),
-
-        Notification.countDocuments({
-          user: currentUserId,
-          isRead: false
-        })
-      ]);
-
-    const formattedNotifications =
-      notifications.map(
-        safeNotification
-      );
-
+    const formatted = notifications.map(safeNotification);
     return res.status(200).json({
       success: true,
-      notifications:
-        formattedNotifications,
-      data:
-        formattedNotifications,
+      notifications: formatted,
+      data: formatted,
       unreadCount,
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        total,
-        pages:
-          Math.ceil(
-            total /
-              limitNum
-          ) || 0
-      }
+      pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) || 0 },
     });
   } catch (error) {
-    console.error(
-      'getNotifications error:',
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message:
-        'Server error retrieving notifications.'
-    });
+    console.error('getNotifications error:', error.message);
+    return res.status(500).json({ success: false, message: 'Server error retrieving notifications.' });
   }
 };
 
-// ============================================================
-// GET UNREAD COUNT
-// GET /api/notifications/unread-count
-// ============================================================
-
-const getUnreadCount = async (
-  req,
-  res
-) => {
+const getUnreadCount = async (req, res) => {
   try {
-    const unreadCount =
-      await Notification.countDocuments({
-        user: req.user._id,
-        isRead: false
-      });
+    if (!req.user || !req.user._id) {
+      return res.status(401).json({ success: false, message: 'Authentication required.' });
+    }
 
-    return res.status(200).json({
-      success: true,
-      unreadCount
-    });
+    const unreadCount = await Notification.countDocuments({ user: req.user._id, isRead: false });
+    return res.status(200).json({ success: true, unreadCount });
   } catch (error) {
-    console.error(
-      'getUnreadCount error:',
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message:
-        'Server error retrieving unread count.'
-    });
+    console.error('getUnreadCount error:', error.message);
+    return res.status(500).json({ success: false, message: 'Server error retrieving unread count.' });
   }
 };
 
-// ============================================================
-// GET NOTIFICATION BY ID
-// GET /api/notifications/:id
-// ============================================================
-
-const getNotificationById =
-  async (
-    req,
-    res
-  ) => {
-    try {
-      const {
-        id
-      } = req.params;
-
-      if (
-        !isValidObjectId(id)
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            'Invalid notification ID.'
-        });
-      }
-
-      const notification =
-        await Notification.findById(
-          id
-        ).lean();
-
-      if (!notification) {
-        return res.status(404).json({
-          success: false,
-          message:
-            'Notification not found.'
-        });
-      }
-
-      if (
-        notification.user.toString() !==
-        req.user._id.toString()
-      ) {
-        return res.status(403).json({
-          success: false,
-          message:
-            'Access denied. You can only view your own notifications.'
-        });
-      }
-
-      return res.status(200).json({
-        success: true,
-        notification:
-          safeNotification(
-            notification
-          )
-      });
-    } catch (error) {
-      console.error(
-        'getNotificationById error:',
-        error
-      );
-
-      return res.status(500).json({
-        success: false,
-        message:
-          'Server error retrieving notification.'
-      });
-    }
-  };
-
-// ============================================================
-// MARK SINGLE NOTIFICATION AS READ
-// ============================================================
-
-const markAsRead = async (
-  req,
-  res
-) => {
+const getNotificationById = async (req, res) => {
   try {
-    const {
-      id
-    } = req.params;
-
-    if (
-      !isValidObjectId(id)
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          'Invalid notification ID.'
-      });
+    const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid notification ID.' });
     }
 
-    const notification =
-      await Notification.findOneAndUpdate(
-        {
-          _id: id,
-          user: req.user._id
-        },
-        {
-          $set: {
-            isRead: true,
-            readAt: new Date()
-          }
-        },
-        { new: true }
-      ).lean();
+    const notification = await Notification.findOne({
+      _id: id,
+      user: req.user._id,
+    }).lean();
 
     if (!notification) {
-      const exists = await Notification.exists({ _id: id });
-      if (!exists) {
-        return res.status(404).json({
-          success: false,
-          message: 'Notification not found.'
-        });
-      }
-
-      return res.status(403).json({
-        success: false,
-        message:
-          'Access denied. You can only update your own notifications.'
-      });
+      // Do not disclose whether another user's notification exists.
+      return res.status(404).json({ success: false, message: 'Notification not found.' });
     }
 
     return res.status(200).json({
       success: true,
-      message:
-        'Notification marked as read.',
-      notification:
-        safeNotification(
-          notification
-        )
+      notification: safeNotification(notification),
+      data: safeNotification(notification),
     });
   } catch (error) {
-    console.error(
-      'markAsRead error:',
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message:
-        'Server error marking notification as read.'
-    });
+    console.error('getNotificationById error:', error.message);
+    return res.status(500).json({ success: false, message: 'Server error retrieving notification.' });
   }
 };
 
-// ============================================================
-// MARK ALL AS READ
-// ============================================================
-
-const markAllAsRead = async (
-  req,
-  res
-) => {
+const markAsRead = async (req, res) => {
   try {
-    const now = new Date();
+    const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid notification ID.' });
+    }
 
-    const result =
-      await Notification.updateMany(
-        {
-          user: req.user._id,
-          isRead: false
-        },
-        {
-          $set: {
-            isRead: true,
-            readAt: now
-          }
-        }
-      );
+    const notification = await Notification.findOneAndUpdate(
+      { _id: id, user: req.user._id },
+      [{ $set: { isRead: true, readAt: { $ifNull: ['$readAt', '$$NOW'] } } }],
+      { new: true }
+    ).lean();
 
-    const modifiedCount =
-      Number(
-        result.modifiedCount
-      ) ||
-      Number(
-        result.nModified
-      ) ||
-      0;
+    if (!notification) {
+      return res.status(404).json({ success: false, message: 'Notification not found.' });
+    }
 
     return res.status(200).json({
       success: true,
-      message:
-        'All notifications marked as read.',
-      modifiedCount
+      message: 'Notification marked as read.',
+      notification: safeNotification(notification),
     });
   } catch (error) {
-    console.error(
-      'markAllAsRead error:',
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message:
-        'Server error marking all notifications as read.'
-    });
+    console.error('markAsRead error:', error.message);
+    return res.status(500).json({ success: false, message: 'Server error marking notification as read.' });
   }
 };
 
-// ============================================================
-// DELETE SINGLE NOTIFICATION
-// DELETE /api/notifications/:id
-// ============================================================
-
-const deleteNotification =
-  async (
-    req,
-    res
-  ) => {
-    try {
-      const {
-        id
-      } = req.params;
-
-      if (
-        !isValidObjectId(id)
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            'Invalid notification ID.'
-        });
-      }
-
-      const notification =
-        await Notification.findById(
-          id
-        ).select('user').lean();
-
-      if (!notification) {
-        return res.status(404).json({
-          success: false,
-          message:
-            'Notification not found.'
-        });
-      }
-
-      if (
-        notification.user.toString() !==
-        req.user._id.toString()
-      ) {
-        return res.status(403).json({
-          success: false,
-          message:
-            'Access denied. You can only delete your own notifications.'
-        });
-      }
-
-      await Notification.findByIdAndDelete(
-        id
-      );
-
-      return res.status(200).json({
-        success: true,
-        message:
-          'Notification deleted successfully.'
-      });
-    } catch (error) {
-      console.error(
-        'deleteNotification error:',
-        error
-      );
-
-      return res.status(500).json({
-        success: false,
-        message:
-          'Server error deleting notification.'
-      });
+const markAllAsRead = async (req, res) => {
+  try {
+    if (!req.user || !req.user._id) {
+      return res.status(401).json({ success: false, message: 'Authentication required.' });
     }
-  };
 
-// ============================================================
-// DELETE ALL READ NOTIFICATIONS
-// DELETE /api/notifications/read
-// ============================================================
+    const now = new Date();
+    const result = await Notification.updateMany(
+      { user: req.user._id, isRead: false },
+      { $set: { isRead: true, readAt: now } }
+    );
 
-const deleteReadNotifications =
-  async (
-    req,
-    res
-  ) => {
-    try {
-      const result =
-        await Notification.deleteMany({
-          user: req.user._id,
-          isRead: true
-        });
+    return res.status(200).json({
+      success: true,
+      message: 'All notifications marked as read.',
+      modifiedCount: Number(result.modifiedCount ?? result.nModified ?? 0),
+    });
+  } catch (error) {
+    console.error('markAllAsRead error:', error.message);
+    return res.status(500).json({ success: false, message: 'Server error marking all notifications as read.' });
+  }
+};
 
-      return res.status(200).json({
-        success: true,
-        message:
-          'Read notifications deleted successfully.',
-        deletedCount:
-          result.deletedCount
-      });
-    } catch (error) {
-      console.error(
-        'deleteReadNotifications error:',
-        error
-      );
-
-      return res.status(500).json({
-        success: false,
-        message:
-          'Server error deleting read notifications.'
-      });
+const deleteNotification = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid notification ID.' });
     }
-  };
 
-// ============================================================
-// EXPORTS
-// ============================================================
+    const result = await Notification.deleteOne({ _id: id, user: req.user._id });
+    if (!result.deletedCount) {
+      return res.status(404).json({ success: false, message: 'Notification not found.' });
+    }
+
+    return res.status(200).json({ success: true, message: 'Notification deleted successfully.' });
+  } catch (error) {
+    console.error('deleteNotification error:', error.message);
+    return res.status(500).json({ success: false, message: 'Server error deleting notification.' });
+  }
+};
+
+const deleteReadNotifications = async (req, res) => {
+  try {
+    if (!req.user || !req.user._id) {
+      return res.status(401).json({ success: false, message: 'Authentication required.' });
+    }
+
+    const result = await Notification.deleteMany({ user: req.user._id, isRead: true });
+    return res.status(200).json({
+      success: true,
+      message: 'Read notifications deleted successfully.',
+      deletedCount: Number(result.deletedCount || 0),
+    });
+  } catch (error) {
+    console.error('deleteReadNotifications error:', error.message);
+    return res.status(500).json({ success: false, message: 'Server error deleting read notifications.' });
+  }
+};
 
 module.exports = {
   createNotification,
@@ -799,5 +437,5 @@ module.exports = {
   markAsRead,
   markAllAsRead,
   deleteNotification,
-  deleteReadNotifications
+  deleteReadNotifications,
 };

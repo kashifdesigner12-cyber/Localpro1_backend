@@ -35,74 +35,76 @@ if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
   });
 }
 
+
+// Escape untrusted values before inserting them into HTML email templates.
+const escapeHtml = (value = "") =>
+  String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+
+const getSafeHttpUrl = (value, fallback) => {
+  try {
+    const parsed = new URL(value || fallback);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      return fallback;
+    }
+    return parsed.href;
+  } catch {
+    return fallback;
+  }
+};
+
 // =====================================================
 // 1. WELCOME EMAIL
 // =====================================================
 
-const sendWelcomeEmail = async (
-  targetUserEmail,
-  targetUserName,
-  rawPassword
-) => {
+const sendWelcomeEmail = async (targetUserEmail, targetUserName) => {
   try {
-    const loginUrl =
-      process.env.FRONTEND_LOGIN_URL ||
-      "http://localhost:3000/login";
+    const fallbackLoginUrl = "http://localhost:3000/login";
+    const loginUrl = getSafeHttpUrl(
+      process.env.FRONTEND_LOGIN_URL,
+      fallbackLoginUrl
+    );
+    const safeName = escapeHtml(targetUserName || "there");
+    const safeEmail = escapeHtml(targetUserEmail || "");
 
     const mailOptions = {
       from: `"LocalPro Team" <${process.env.EMAIL_USER}>`,
       to: targetUserEmail,
-      subject: "Welcome to LocalPro - Your Account Credentials",
+      subject: "Welcome to LocalPro - Your Account Is Ready",
+      text: `Hello ${targetUserName || "there"},\n\nYour LocalPro account has been created. Sign in with your registered email and the password you set during registration. For your security, passwords are never included in email messages.\n\nSign in: ${loginUrl}`,
       html: `
         <!DOCTYPE html>
         <html lang="en">
         <head>
           <meta charset="UTF-8">
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Welcome to LocalPro</title>
         </head>
         <body style="margin:0;padding:0;background-color:#f4f7fa;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
-          <table border="0" cellpadding="0" cellspacing="0" width="100%" style="padding:40px 0;">
-            <tr>
-              <td align="center">
-                <table border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width:600px;background-color:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;">
-                  <tr>
-                    <td style="background:linear-gradient(135deg,#1e293b 0%,#0f172a 100%);padding:36px 40px;text-align:center;">
-                      <h1 style="color:#ffffff;margin:0;font-size:24px;">LocalPro Portal</h1>
-                      <p style="color:#94a3b8;margin:8px 0 0;font-size:14px;">Welcome to the team</p>
-                    </td>
-                  </tr>
-                  <tr>
-                    <td style="padding:36px 40px 24px;">
-                      <h2 style="color:#0f172a;margin:0 0 16px;font-size:20px;">Hello, ${targetUserName}!</h2>
-                      <p style="color:#475569;font-size:15px;line-height:1.6;margin:0 0 24px;">
-                        Your account has been created successfully. You can now access your dashboard using the credentials below:
-                      </p>
-                      <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;margin-bottom:28px;">
-                        <tr>
-                          <td style="padding:20px;">
-                            <table border="0" cellpadding="0" cellspacing="0" width="100%">
-                              <tr>
-                                <td style="padding:6px 0;color:#64748b;font-size:14px;width:140px;"><strong>Email:</strong></td>
-                                <td style="padding:6px 0;color:#0f172a;font-size:14px;font-weight:500;">${targetUserEmail}</td>
-                              </tr>
-                              <tr>
-                                <td style="padding:6px 0;color:#64748b;font-size:14px;"><strong>Password:</strong></td>
-                                <td style="padding:6px 0;font-size:14px;">
-                                  <code style="background-color:#e2e8f0;color:#2563eb;padding:3px 8px;border-radius:4px;font-size:14px;font-weight:600;">${rawPassword}</code>
-                                </td>
-                              </tr>
-                            </table>
-                          </td>
-                        </tr>
-                      </table>
-                      <div style="text-align:center;margin-bottom:30px;">
-                        <a href="${loginUrl}" target="_blank" rel="noopener noreferrer" style="background-color:#2563eb;color:#ffffff;padding:14px 32px;font-size:15px;font-weight:600;text-decoration:none;border-radius:8px;display:inline-block;">Sign In to Your Account</a>
-                      </div>
-                    </td>
-                  </tr>
-                </table>
-              </td>
-            </tr>
+          <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="padding:40px 0;">
+            <tr><td align="center">
+              <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width:600px;background-color:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;">
+                <tr><td style="background:linear-gradient(135deg,#1e293b 0%,#0f172a 100%);padding:36px 40px;text-align:center;">
+                  <h1 style="color:#ffffff;margin:0;font-size:24px;">LocalPro Portal</h1>
+                  <p style="color:#cbd5e1;margin:8px 0 0;font-size:14px;">Welcome to the team</p>
+                </td></tr>
+                <tr><td style="padding:36px 40px 30px;">
+                  <h2 style="color:#0f172a;margin:0 0 16px;font-size:20px;">Hello, ${safeName}!</h2>
+                  <p style="color:#475569;font-size:15px;line-height:1.6;margin:0 0 22px;">Your LocalPro account has been created successfully. You can sign in using your registered email address and the password you set during registration.</p>
+                  <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;margin-bottom:28px;">
+                    <tr><td style="padding:20px;color:#0f172a;font-size:14px;"><strong>Email:</strong> ${safeEmail}</td></tr>
+                  </table>
+                  <p style="color:#64748b;font-size:13px;line-height:1.6;margin:0 0 24px;">For your security, LocalPro will never send your password in an email. If you did not create this account, please contact your administrator.</p>
+                  <div style="text-align:center;margin-bottom:10px;">
+                    <a href="${escapeHtml(loginUrl)}" target="_blank" rel="noopener noreferrer" style="background-color:#2563eb;color:#ffffff;padding:14px 32px;font-size:15px;font-weight:600;text-decoration:none;border-radius:8px;display:inline-block;">Sign In to Your Account</a>
+                  </div>
+                </td></tr>
+              </table>
+            </td></tr>
           </table>
         </body>
         </html>
@@ -110,9 +112,7 @@ const sendWelcomeEmail = async (
     };
 
     const info = await transporter.sendMail(mailOptions);
-
     console.log("Welcome email sent:", targetUserEmail);
-
     return info;
   } catch (err) {
     console.error("SendWelcomeEmail failed:", err.message);

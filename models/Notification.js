@@ -1,143 +1,105 @@
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
-const NotificationSchema = new mongoose.Schema(
+const { Schema } = mongoose;
+
+const notificationSchema = new Schema(
   {
-    // ==========================================
-    // NOTIFICATION OWNER
-    // ==========================================
+    // The authenticated user who owns this notification.
     user: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
-      required: [true, 'User is required'],
-      index: true
-    },
-
-    // ==========================================
-    // NOTIFICATION TYPE
-    // ==========================================
-    type: {
-      type: String,
-      enum: [
-        'task',
-        'message',
-        'mention',
-        'alert',
-        'leave',
-        'system',
-        'appointment',
-        'call',
-        'event',
-        'attendance'
-      ],
-      default: 'system',
-      index: true
-    },
-
-    // ==========================================
-    // TITLE
-    // ==========================================
-    title: {
-      type: String,
-      required: [true, 'Title is required'],
-      trim: true
-    },
-
-    // ==========================================
-    // MESSAGE
-    // ==========================================
-    message: {
-      type: String,
-      required: [true, 'Message is required'],
-      trim: true
-    },
-
-    // ==========================================
-    // READ STATUS
-    // ==========================================
-    isRead: {
-      type: Boolean,
-      default: false,
-      index: true
-    },
-
-    readAt: {
-      type: Date,
-      default: null
-    },
-
-    // ==========================================
-    // RELATED RECORD
-    // ==========================================
-    relatedId: {
-      type: mongoose.Schema.Types.ObjectId,
-      default: null
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      required: [true, "User is required"],
     },
 
     relatedType: {
       type: String,
       enum: [
-        'Task',
-        'Message',
-        'LeaveRequest',
-        'User',
-        'System',
-        'Call',
-        'Appointment',
-        'Event',
-        'Attendance',
-        null
+        "Task",
+        "Message",
+        "Conversation",
+        "LeaveRequest",
+        "User",
+        "System",
+        "Call",
+        "Appointment",
+        "Event",
+        "Attendance",
+        null,
       ],
-      default: null
+      default: null,
     },
 
-    // ==========================================
-    // ACTION URL
-    // ==========================================
+    title: {
+      type: String,
+      required: [true, "Title is required"],
+      trim: true,
+      maxlength: [200, "Title cannot exceed 200 characters"],
+    },
+
+    message: {
+      type: String,
+      required: [true, "Message is required"],
+      trim: true,
+      maxlength: [5000, "Message cannot exceed 5000 characters"],
+    },
+
+    isRead: {
+      type: Boolean,
+      default: false,
+      required: true,
+    },
+
+    readAt: {
+      type: Date,
+      default: null,
+    },
+
+    relatedId: {
+      type: Schema.Types.ObjectId,
+      default: null,
+    },
+
+    relatedType: {
+      type: String,
+      enum: [
+        "Task",
+        "Message",
+        "LeaveRequest",
+        "User",
+        "System",
+        "Call",
+        "Appointment",
+        "Event",
+        "Attendance",
+        null,
+      ],
+      default: null,
+    },
+
     actionUrl: {
       type: String,
-      default: ''
+      default: "",
+      trim: true,
+      maxlength: [2048, "Action URL cannot exceed 2048 characters"],
     },
 
-    // ==========================================
-    // ATTENDANCE ACTION DATA
-    // ==========================================
+    // Treat metadata as untrusted input. Validate and whitelist fields at the
+    // controller/service boundary before storing or returning it to clients.
     metadata: {
-      type: mongoose.Schema.Types.Mixed,
-      default: {}
-    }
+      type: Schema.Types.Mixed,
+      default: () => ({}),
+    },
   },
   {
-    timestamps: true
-  }
+    timestamps: true,
+    strict: true,
+  },
 );
 
-// ==========================================
-// INDEXES
-// ==========================================
+// Indexes are scoped by owner so notification reads can remain user-specific.
+// The compound indexes support common list, unread-count, and type-filter queries.
+notificationSchema.index({ user: 1, createdAt: -1 });
+notificationSchema.index({ user: 1, isRead: 1, createdAt: -1 });
+notificationSchema.index({ user: 1, type: 1, createdAt: -1 });
 
-// User notifications
-NotificationSchema.index({
-  user: 1,
-  createdAt: -1
-});
-
-// Unread notifications
-NotificationSchema.index({
-  user: 1,
-  isRead: 1
-});
-
-// Attendance notifications
-NotificationSchema.index({
-  user: 1,
-  type: 1,
-  createdAt: -1
-});
-
-// ==========================================
-// EXPORT
-// ==========================================
-module.exports = mongoose.model(
-  'Notification',
-  NotificationSchema
-);
+module.exports = mongoose.model("Notification", notificationSchema);

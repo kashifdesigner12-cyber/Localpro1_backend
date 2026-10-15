@@ -463,6 +463,20 @@ const createConversation = async (req, res) => {
       }
 
       targetIds = participants.map(toId).filter(Boolean);
+
+      const normalizedGroupName = String(groupName || "").trim();
+      if (!normalizedGroupName) {
+        return res.status(400).json({
+          success: false,
+          message: "Group name is required.",
+        });
+      }
+      if (normalizedGroupName.length > 80) {
+        return res.status(400).json({
+          success: false,
+          message: "Group name cannot exceed 80 characters.",
+        });
+      }
     } else {
       const targetId = recipientId || userId || participantId;
 
@@ -553,7 +567,7 @@ const createConversation = async (req, res) => {
       conversation = await Conversation.create({
         participants: participantIds,
         isGroup: true,
-        groupName: String(groupName || "Team Group").trim(),
+        groupName: String(groupName).trim(),
         groupAdmin: req.user._id,
         lastMessage: "",
         lastMessageAt: null,
@@ -790,6 +804,31 @@ const sendConversationMessage = async (req, res) => {
       }
     }
 
+    const allowedMessageTypes = [
+      "text", "image", "file", "document", "video", "audio", "system",
+    ];
+    const allowedChannels = ["chat", "sms", "email"];
+    const allowedDirections = ["inbound", "outbound", "internal"];
+
+    if (messageType && !allowedMessageTypes.includes(messageType)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid message type.",
+      });
+    }
+    if (channel && !allowedChannels.includes(channel)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid message channel.",
+      });
+    }
+    if (direction && !allowedDirections.includes(direction)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid message direction.",
+      });
+    }
+
     let calculatedType = messageType || "text";
 
     if (parsedAttachments.length && (!messageType || messageType === "text")) {
@@ -973,7 +1012,26 @@ const updateConversation = async (req, res) => {
     }
 
     if (groupName !== undefined && conversation.isGroup) {
-      conversation.groupName = String(groupName).trim();
+      const normalizedGroupName = String(groupName).trim();
+      if (!normalizedGroupName) {
+        return res.status(400).json({
+          success: false,
+          message: "Group name cannot be empty.",
+        });
+      }
+      if (normalizedGroupName.length > 80) {
+        return res.status(400).json({
+          success: false,
+          message: "Group name cannot exceed 80 characters.",
+        });
+      }
+      if (getRole(req.user) !== "admin" && String(conversation.groupAdmin) !== String(req.user._id)) {
+        return res.status(403).json({
+          success: false,
+          message: "Only the group admin or an Admin can rename this group.",
+        });
+      }
+      conversation.groupName = normalizedGroupName;
     }
 
     await conversation.save();

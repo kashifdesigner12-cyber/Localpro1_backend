@@ -1,69 +1,89 @@
-const multer = require("multer");
-const path = require("path");
-const fs = require("fs");
+"use strict";
 
-// Ensure uploads directory exists
-const uploadDir = path.join(__dirname, "../uploads");
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const multer = require("multer");
+
+const UPLOAD_ROOT = path.resolve(__dirname, "..", "uploads", "chat");
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
+const MAX_FILES = 5;
+
+const ALLOWED_EXTENSIONS = new Set([
+  ".jpg", ".jpeg", ".png", ".webp", ".gif",
+  ".pdf", ".txt", ".csv",
+  ".doc", ".docx", ".xls", ".xlsx",
+]);
+
+const ALLOWED_MIME_TYPES = new Set([
+  "image/jpeg", "image/png", "image/webp", "image/gif",
+  "application/pdf", "text/plain", "text/csv",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+]);
+
+fs.mkdirSync(UPLOAD_ROOT, { recursive: true });
+
+const storage = multer.diskStorage({
+  destination(req, file, callback) {
+    callback(null, UPLOAD_ROOT);
+  },
+  filename(req, file, callback) {
+    const extension = path.extname(file.originalname || "").toLowerCase();
+    callback(null, `${Date.now()}-${crypto.randomBytes(16).toString("hex")}${extension}`);
+  },
+});
+
+function fileFilter(req, file, callback) {
+  const extension = path.extname(file.originalname || "").toLowerCase();
+  const mimeType = String(file.mimetype || "").toLowerCase();
+
+  if (!ALLOWED_EXTENSIONS.has(extension) || !ALLOWED_MIME_TYPES.has(mimeType)) {
+    const error = new Error("Unsupported attachment file type.");
+    error.code = "CHAT_FILE_TYPE_NOT_ALLOWED";
+    return callback(error);
+  }
+
+  return callback(null, true);
 }
 
-// Storage Configuration
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadDir);
-  },
-  filename: function (req, file, cb) {
-    // Generate unique name: timestamp-random-originalName
-    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    const cleanFileName = file.originalname.replace(/[^a-zA-Z0-9.-]/g, "_");
-    cb(null, uniqueSuffix + "-" + cleanFileName);
-  },
-});
-
-// File Filter (Images, Docs, PDFs, Audio, Video, Zip)
-const fileFilter = (req, file, cb) => {
-  const allowedMimeTypes = [
-    // Images
-    "image/jpeg",
-    "image/png",
-    "image/webp",
-    "image/gif",
-    "image/svg+xml",
-    // Documents
-    "application/pdf",
-    "application/msword",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "application/vnd.ms-excel",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    "application/vnd.ms-powerpoint",
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    "text/plain",
-    "text/csv",
-    // Audio / Video / Archives
-    "audio/mpeg",
-    "audio/wav",
-    "audio/ogg",
-    "video/mp4",
-    "video/webm",
-    "application/zip",
-    "application/x-zip-compressed",
-  ];
-
-  if (allowedMimeTypes.includes(file.mimetype)) {
-    cb(null, true);
-  } else {
-    cb(new Error(`File type ${file.mimetype} is not allowed.`), false);
-  }
-};
-
-// Multer Upload Instance (Max file size: 25MB, up to 5 files at once)
-const upload = multer({
-  storage: storage,
+const uploadChatAttachments = multer({
+  storage,
+  fileFilter,
   limits: {
-    fileSize: 25 * 1024 * 1024, // 25MB
+    fileSize: MAX_FILE_SIZE,
+    files: MAX_FILES,
+    fields: 20,
+    parts: MAX_FILES + 20,
   },
-  fileFilter: fileFilter,
 });
 
-module.exports = upload;
+function handleUploadError(error, req, res, next) {
+  if (!error) return next();
+
+  if (error instanceof multer.MulterError) {
+    const message = error.code === "LIMIT_FILE_SIZE"
+      ? "Attachment exceeds the 10 MB size limit."
+      : error.code === "LIMIT_FILE_COUNT"
+        ? `A maximum of ${MAX_FILES} attachments is allowed.`
+        : "Attachment upload could not be completed.";
+
+    return res.status(400).json({ success: false, message });
+  }
+
+  if (error.code === "CHAT_FILE_TYPE_NOT_ALLOWED") {
+    return res.status(415).json({ success: false, message: error.message });
+  }
+
+  return next(error);
+}
+
+module.exports = {
+  uploadChatAttachments,
+  handleUploadError,
+  MAX_FILE_SIZE,
+  MAX_FILES,
+  UPLOAD_ROOT,
+};

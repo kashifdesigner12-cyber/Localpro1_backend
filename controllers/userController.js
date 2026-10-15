@@ -359,7 +359,7 @@ const getUsers = async (req, res) => {
     const filter = {};
 
     // SEARCH
-    if (search && search.trim()) {
+    if (typeof search === "string" && search.trim()) {
       const searchValue = search.trim();
 
       const escapedSearch = searchValue.replace(
@@ -557,7 +557,6 @@ const getUserById = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "Invalid user ID.",
-        receivedId: userId,
       });
     }
 
@@ -770,7 +769,8 @@ const createUser = async (req, res) => {
     });
 
     try {
-      await sendWelcomeEmail(user.email, user.name, password);
+      // Never send a user's plaintext password by email.
+      await sendWelcomeEmail(user.email, user.name);
     } catch (emailErr) {
       console.error("Failed to send welcome email to new user:", emailErr.message);
     }
@@ -781,7 +781,7 @@ const createUser = async (req, res) => {
     return res.status(201).json({
       success: true,
       message:
-        "User created successfully and welcome email sent.",
+        "User created successfully. Welcome email delivery may take a moment.",
       user: safeUserData,
       data: safeUserData,
     });
@@ -857,7 +857,6 @@ const updateUser = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "Invalid user ID.",
-        receivedId: userId,
       });
     }
 
@@ -1375,7 +1374,6 @@ const updateUserStatus = async (
       return res.status(400).json({
         success: false,
         message: "Invalid user ID.",
-        receivedId: userId,
       });
     }
 
@@ -1521,7 +1519,6 @@ const updateUserRole = async (
       return res.status(400).json({
         success: false,
         message: "Invalid user ID.",
-        receivedId: userId,
       });
     }
 
@@ -1666,7 +1663,6 @@ const deleteUser = async (
       return res.status(400).json({
         success: false,
         message: "Invalid user ID.",
-        receivedId: userId,
       });
     }
 
@@ -1751,12 +1747,26 @@ const getProfile = async (
     }
 
     const authenticatedUserId = getAuthenticatedUserId(req);
+
+    if (!authenticatedUserId || !isValidObjectId(authenticatedUserId)) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid authenticated user ID.",
+      });
+    }
+
     const user = await User.findById(getObjectId(authenticatedUserId))
       .select("-password")
       .lean();
 
-    const safeUserData =
-      safeUser(user || req.user);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found.",
+      });
+    }
+
+    const safeUserData = safeUser(user);
 
     return res.status(200).json({
       success: true,
@@ -2073,8 +2083,8 @@ const changePassword = async (
         authenticatedUserId
       )
     ) {
-      return res.status(400).json({
-        string: false,
+      return res.status(401).json({
+        success: false,
         message:
           "Invalid authenticated user ID.",
       });

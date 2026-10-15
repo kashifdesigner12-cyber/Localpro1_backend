@@ -1,9 +1,5 @@
 const express = require("express");
 
-// =====================================================
-// USER CONTROLLER
-// =====================================================
-
 const {
   getUsers,
   getUserStats,
@@ -18,145 +14,94 @@ const {
   changePassword,
 } = require("../controllers/userController");
 
-// =====================================================
-// ATTENDANCE CONTROLLER
-// =====================================================
-
-let getUserAttendanceSchedule = null;
-let setUserAttendanceSchedule = null;
-
-try {
-  const attendanceController = require("../controllers/attendanceController");
-
-  getUserAttendanceSchedule =
-    attendanceController.getUserAttendanceSchedule;
-
-  setUserAttendanceSchedule =
-    attendanceController.setUserAttendanceSchedule;
-} catch (e) {
-  // If attendanceController doesn't export them,
-  // fallback gracefully.
-}
-
-// Fallback handlers if attendance controller functions
-// are not defined.
-const handleGetSchedule =
-  getUserAttendanceSchedule || getUserById;
-
-const handleSetSchedule =
-  setUserAttendanceSchedule || updateUser;
-
-// =====================================================
-// AUTH MIDDLEWARE
-// =====================================================
-
-const {
-  protect,
-  authorize,
-} = require("../middleware/authMiddleware");
+const { protect, authorize } = require("../middleware/authMiddleware");
 
 const router = express.Router();
 
-// =====================================================
-// AUTHENTICATION
-// =====================================================
-
-// All user routes require authentication.
+// Every endpoint in this router requires a valid authenticated user.
 router.use(protect);
 
-// =====================================================
-// PROFILE ROUTES
-// IMPORTANT: BEFORE /:id
-// =====================================================
-
+// Profile routes must be declared before routes containing /:id.
 router.get("/profile", getProfile);
 router.put("/profile", updateProfile);
 router.patch("/profile", updateProfile);
 
-// =====================================================
-// CHANGE PASSWORD
-// =====================================================
-
 router.put("/profile/password", changePassword);
 router.patch("/profile/password", changePassword);
 
-// =====================================================
-// BACKWARD COMPATIBLE CHANGE PASSWORD
-// =====================================================
-
+// Backward-compatible aliases for clients using the older endpoint.
 router.put("/change-password", changePassword);
 router.patch("/change-password", changePassword);
 
-// =====================================================
-// USER STATISTICS
-// ADMIN + MANAGER
-// =====================================================
-
+// User listing and creation are restricted to admin/manager roles.
 router.get("/stats", authorize("admin", "manager"), getUserStats);
-
-// =====================================================
-// GET ALL USERS
-// ADMIN + MANAGER
-// =====================================================
-
 router.get("/", authorize("admin", "manager"), getUsers);
-
-// =====================================================
-// CREATE USER
-// ADMIN + MANAGER
-// =====================================================
-
 router.post("/", authorize("admin", "manager"), createUser);
 
-// =====================================================
-// ATTENDANCE SCHEDULE
-// ADMIN + MANAGER
-// =====================================================
+// Attendance schedules are optional until the attendance controller implements
+// the dedicated handlers. Never substitute general user handlers here.
+let attendanceController = {};
 
-router.get("/:id/attendance-schedule", authorize("admin", "manager"), handleGetSchedule);
-router.put("/:id/attendance-schedule", authorize("admin", "manager"), handleSetSchedule);
-router.patch("/:id/attendance-schedule", authorize("admin", "manager"), handleSetSchedule);
+try {
+  attendanceController = require("../controllers/attendanceController");
+} catch (error) {
+  // Only tolerate the controller itself being absent. Re-throw errors caused by
+  // missing dependencies or bugs inside an existing attendance controller.
+  const isMissingAttendanceController =
+    error &&
+    error.code === "MODULE_NOT_FOUND" &&
+    typeof error.message === "string" &&
+    error.message.includes("../controllers/attendanceController");
 
-// =====================================================
-// USER STATUS
-// ADMIN + MANAGER
-// =====================================================
+  if (!isMissingAttendanceController) {
+    throw error;
+  }
+}
 
+const unavailableScheduleHandler = (_req, res) =>
+  res.status(501).json({
+    success: false,
+    message: "Attendance schedule endpoints are not configured.",
+  });
+
+const getUserAttendanceSchedule =
+  typeof attendanceController.getUserAttendanceSchedule === "function"
+    ? attendanceController.getUserAttendanceSchedule
+    : unavailableScheduleHandler;
+
+const setUserAttendanceSchedule =
+  typeof attendanceController.setUserAttendanceSchedule === "function"
+    ? attendanceController.setUserAttendanceSchedule
+    : unavailableScheduleHandler;
+
+// These specific routes must stay above router.get("/:id", ...).
+router.get(
+  "/:id/attendance-schedule",
+  authorize("admin", "manager"),
+  getUserAttendanceSchedule
+);
+router.put(
+  "/:id/attendance-schedule",
+  authorize("admin", "manager"),
+  setUserAttendanceSchedule
+);
+router.patch(
+  "/:id/attendance-schedule",
+  authorize("admin", "manager"),
+  setUserAttendanceSchedule
+);
+
+// Admin/manager can manage status; only admin can change roles or delete users.
 router.put("/:id/status", authorize("admin", "manager"), updateUserStatus);
 router.patch("/:id/status", authorize("admin", "manager"), updateUserStatus);
-
-// =====================================================
-// USER ROLE
-// ADMIN ONLY
-// =====================================================
 
 router.put("/:id/role", authorize("admin"), updateUserRole);
 router.patch("/:id/role", authorize("admin"), updateUserRole);
 
-// =====================================================
-// GET USER BY ID
-// ADMIN + MANAGER
-// =====================================================
-
 router.get("/:id", authorize("admin", "manager"), getUserById);
-
-// =====================================================
-// UPDATE USER
-// ADMIN + MANAGER
-// =====================================================
-
 router.put("/:id", authorize("admin", "manager"), updateUser);
 router.patch("/:id", authorize("admin", "manager"), updateUser);
 
-// =====================================================
-// DELETE USER
-// ADMIN ONLY
-// =====================================================
-
 router.delete("/:id", authorize("admin"), deleteUser);
-
-// =====================================================
-// EXPORT
-// =====================================================
 
 module.exports = router;

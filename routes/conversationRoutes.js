@@ -19,69 +19,33 @@ const { protect } = require("../middleware/authMiddleware");
 
 const router = express.Router();
 
-// All conversation routes require authentication.
+// Every conversation endpoint requires an authenticated user.
 router.use(protect);
 
-// --------------------------------------------------
-// STATIC ROUTES — MUST COME BEFORE /:id
-// --------------------------------------------------
-
+// Static routes must be declared before routes containing :id.
 router.get("/unread-count", getUnreadMessageCount);
 router.get("/unread", getUnreadMessageCount);
 
-// --------------------------------------------------
-// MESSAGE READ ROUTES
-// --------------------------------------------------
+// Mark an individual message as read.
+router.put("/messages/:messageId/read", markMessageAsRead);
+router.patch("/messages/:messageId/read", markMessageAsRead);
 
-router.put(
-  "/messages/:messageId/read",
-  markMessageAsRead
-);
-
-router.patch(
-  "/messages/:messageId/read",
-  markMessageAsRead
-);
-
-// --------------------------------------------------
-// CONVERSATION COLLECTION
-// --------------------------------------------------
-
-// GET /api/conversations
+// Conversation collection.
 router.get("/", getConversations);
-
-// POST /api/conversations
-// Body: { recipientId: "USER_ID" }
-// Use isGroup: true only when intentionally creating a group.
 router.post("/", createConversation);
 
-// --------------------------------------------------
-// CONVERSATION MESSAGES
-// Keep these before the single-conversation /:id routes.
-// --------------------------------------------------
-
-// GET /api/conversations/:id/messages
+// Messages belonging to a conversation. Keep these before /:id routes.
 router.get("/:id/messages", getConversationMessages);
-
-// POST /api/conversations/:id/messages
 router.post("/:id/messages", sendConversationMessage);
 
-// --------------------------------------------------
-// CONVERSATION READ STATUS
-// --------------------------------------------------
-
+// Mark all eligible messages in a conversation as read.
 router.put("/:id/read", markAsRead);
 router.patch("/:id/read", markAsRead);
 
-// --------------------------------------------------
-// SINGLE CONVERSATION
-// --------------------------------------------------
-
+// Single-conversation operations.
 router.get("/:id", getConversation);
-
 router.put("/:id", updateConversation);
 router.patch("/:id", updateConversation);
-
 router.delete("/:id", deleteConversation);
 
 module.exports = router;

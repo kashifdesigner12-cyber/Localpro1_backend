@@ -1,6 +1,5 @@
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
-const { sendWelcomeEmail } = require("../utils/sendEmail");
 
 // ==========================================
 // Build Safe User Object
@@ -16,28 +15,16 @@ const safeUser = (user) => {
     phone: user.phone || "",
     role: user.role || "user",
     status: user.status || "Active",
-    avatar: user.avatar || null, // Directly pass avatar without string length restriction
-
+    avatar: user.avatar || null,
     business: user.business || {},
     preferences: user.preferences || {},
-
     attendanceSettings: user.attendanceSettings || {},
-
     attendanceSchedule:
-      user.attendanceSchedule ||
-      user?.preferences?.attendanceSchedule ||
-      null,
-
+      user.attendanceSchedule || user?.preferences?.attendanceSchedule || null,
     workSchedule:
-      user.workSchedule ||
-      user?.preferences?.workSchedule ||
-      null,
-
-    notificationPreferences:
-      user.notificationPreferences || {},
-
+      user.workSchedule || user?.preferences?.workSchedule || null,
+    notificationPreferences: user.notificationPreferences || {},
     integrations: user.integrations || {},
-
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
   };
@@ -46,17 +33,17 @@ const safeUser = (user) => {
 // ==========================================
 // Generate JWT Token
 // ==========================================
-const generateToken = (id, role) =>
-  jwt.sign(
-    {
-      id,
-      role,
-    },
+const generateToken = (id, role) => {
+  if (!process.env.JWT_SECRET) {
+    throw new Error("JWT_SECRET is missing from environment variables.");
+  }
+
+  return jwt.sign(
+    { id: String(id), role },
     process.env.JWT_SECRET,
-    {
-      expiresIn: process.env.JWT_EXPIRES_IN || "7d",
-    }
+    { expiresIn: process.env.JWT_EXPIRES_IN || "7d" }
   );
+};
 
 // ==========================================
 // Cookie Configuration
@@ -69,26 +56,44 @@ const getCookieOptions = () => ({
   path: "/",
 });
 
+const isAccountInactive = (user) =>
+  user.isDeleted === true ||
+  user.isActive === false ||
+  ["Blocked", "Inactive", "Pending"].includes(user.status);
+
 // ==========================================
 // POST /api/auth/register
 // Register New User
 // ==========================================
 const register = async (req, res) => {
   try {
-    const { name, email, password, phone, role } = req.body;
+    const { name, email, password, phone } = req.body || {};
 
-    if (!name || !email || !password) {
+    if (
+      typeof name !== "string" ||
+      typeof email !== "string" ||
+      typeof password !== "string" ||
+      !name.trim() ||
+      !email.trim() ||
+      !password
+    ) {
       return res.status(400).json({
         success: false,
         message: "Name, email and password are required.",
       });
     }
 
-    const emailNormalized = email.trim().toLowerCase();
+    if (password.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: "Password must be at least 6 characters.",
+      });
+    }
 
-    const existingUser = await User.findOne({
-      email: emailNormalized,
-    }).select("_id").lean();
+    const emailNormalized = email.trim().toLowerCase();
+    const existingUser = await User.findOne({ email: emailNormalized })
+      .select("_id")
+      .lean();
 
     if (existingUser) {
       return res.status(409).json({
@@ -101,20 +106,18 @@ const register = async (req, res) => {
       name: name.trim(),
       email: emailNormalized,
       password,
-      phone: phone ? phone.trim() : "",
-      role: role || "user",
+      phone: typeof phone === "string" ? phone.trim() : "",
+      // Never accept privileged roles from public registration input.
+      role: "user",
     });
 
-    sendWelcomeEmail(user.email, user.name, password).catch((emailError) => {
-      console.error("Failed to send welcome email:", emailError);
-    });
-
+    // Do not email raw passwords. A welcome email should only be added when
+    // it uses a verified password-setup/reset flow.
     const safeUserData = safeUser(user.toObject ? user.toObject() : user);
 
     return res.status(201).json({
       success: true,
-      message:
-        "Registration successful. Credentials email sent to user.",
+      message: "Registration successful. You can now sign in with your account.",
       user: safeUserData,
       data: safeUserData,
     });
@@ -129,13 +132,10 @@ const register = async (req, res) => {
     }
 
     if (error.name === "ValidationError") {
-      const messages = Object.values(error.errors).map(
-        (err) => err.message
-      );
-
+      const messages = Object.values(error.errors || {}).map((err) => err.message);
       return res.status(400).json({
         success: false,
-        message: messages.join(" "),
+        message: messages.join(" ") || "Invalid registration details.",
       });
     }
 
@@ -152,62 +152,46 @@ const register = async (req, res) => {
 // ==========================================
 const login = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password } = req.body || {};
 
-    if (!email || !password) {
+    if (
+      typeof email !== "string" ||
+      typeof password !== "string" ||
+      !email.trim() ||
+      !password
+    ) {
       return res.status(400).json({
         success: false,
         message: "Email and password are required.",
       });
     }
 
+    if (!process.env.JWT_SECRET) {
+      console.error("JWT_SECRET is missing from environment variables.");
+      return res.status(500).json({
+        success: false,
+        message: "Server authentication configuration error.",
+      });
+    }
+
     const emailNormalized = email.trim().toLowerCase();
+    const user = await User.findOne({ email: emailNormalized }).select("+password");
 
-    const user = await User.findOne({
-      email: emailNormalized,
-    }).select("+password");
-
-    if (!user) {
+    if (!user || user.isDeleted === true) {
       return res.status(401).json({
         success: false,
         message: "Invalid email or password.",
       });
     }
 
-    if (user.isDeleted === true) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid email or password.",
-      });
-    }
-
-    if (user.status === "Pending") {
-      return res.status(403).json({
-        success: false,
-        message: "Your account is pending approval.",
-      });
-    }
-
-    if (
-      user.status === "Blocked" ||
-      user.status === "Inactive"
-    ) {
-      return res.status(403).json({
-        success: false,
-        message:
-          "Your account has been deactivated or blocked.",
-      });
-    }
-
-    if (user.isActive === false) {
-      return res.status(403).json({
-        success: false,
-        message: "Your account has been deactivated.",
-      });
+    if (isAccountInactive(user)) {
+      const message = user.status === "Pending"
+        ? "Your account is pending approval."
+        : "Your account has been deactivated or blocked.";
+      return res.status(403).json({ success: false, message });
     }
 
     const isMatch = await user.comparePassword(password);
-
     if (!isMatch) {
       return res.status(401).json({
         success: false,
@@ -216,11 +200,9 @@ const login = async (req, res) => {
     }
 
     const token = generateToken(user._id, user.role);
-
     res.cookie("token", token, getCookieOptions());
 
     const safeUserData = safeUser(user);
-
     return res.status(200).json({
       success: true,
       message: "Login successful.",
@@ -230,7 +212,6 @@ const login = async (req, res) => {
     });
   } catch (error) {
     console.error("Login error:", error);
-
     return res.status(500).json({
       success: false,
       message: "Server error. Please try again.",
@@ -245,27 +226,15 @@ const login = async (req, res) => {
 const getMe = async (req, res) => {
   try {
     if (!req.user || !req.user._id) {
-      return res.status(401).json({
-        success: false,
-        message: "Not authenticated.",
-      });
+      return res.status(401).json({ success: false, message: "Not authenticated." });
     }
 
     const user = await User.findById(req.user._id).lean();
-
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found.",
-      });
+      return res.status(404).json({ success: false, message: "User not found." });
     }
 
-    if (
-      user.isDeleted === true ||
-      user.isActive === false ||
-      user.status === "Blocked" ||
-      user.status === "Inactive"
-    ) {
+    if (isAccountInactive(user)) {
       return res.status(401).json({
         success: false,
         message: "Your account is no longer active.",
@@ -273,7 +242,6 @@ const getMe = async (req, res) => {
     }
 
     const safeUserData = safeUser(user);
-
     return res.status(200).json({
       success: true,
       user: safeUserData,
@@ -281,17 +249,12 @@ const getMe = async (req, res) => {
     });
   } catch (error) {
     console.error("Get me error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Server error.",
-    });
+    return res.status(500).json({ success: false, message: "Server error." });
   }
 };
 
 // ==========================================
-// PUT /api/auth/profile
-// PUT /api/auth/me
+// PUT /api/auth/profile and PUT /api/auth/me
 // Update User Profile
 // ==========================================
 const updateProfile = async (req, res) => {
@@ -304,68 +267,55 @@ const updateProfile = async (req, res) => {
       attendanceSchedule,
       workSchedule,
       attendanceSettings,
-    } = req.body;
+    } = req.body || {};
 
     const user = await User.findById(req.user._id);
-
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found.",
-      });
+      return res.status(404).json({ success: false, message: "User not found." });
     }
 
     if (name !== undefined) {
-      if (!name || !name.trim()) {
-        return res.status(400).json({
-          success: false,
-          message: "Name cannot be empty.",
-        });
+      if (typeof name !== "string" || !name.trim()) {
+        return res.status(400).json({ success: false, message: "Name cannot be empty." });
       }
-
       user.name = name.trim();
     }
 
     if (phone !== undefined) {
-      user.phone = phone ? phone.trim() : "";
+      if (typeof phone !== "string") {
+        return res.status(400).json({ success: false, message: "Phone must be a string." });
+      }
+      user.phone = phone.trim();
     }
 
     if (avatar !== undefined) {
+      if (avatar !== null && typeof avatar !== "string") {
+        return res.status(400).json({ success: false, message: "Avatar must be a URL/string or null." });
+      }
       user.avatar = avatar;
     }
 
-    if (
-      preferences !== undefined &&
-      typeof preferences === "object"
-    ) {
-      user.preferences = {
-        ...(user.preferences || {}),
-        ...preferences,
-      };
+    if (preferences !== undefined) {
+      if (!preferences || typeof preferences !== "object" || Array.isArray(preferences)) {
+        return res.status(400).json({ success: false, message: "Preferences must be an object." });
+      }
+      user.preferences = { ...(user.preferences || {}), ...preferences };
     }
 
     if (attendanceSchedule !== undefined) {
       user.attendanceSchedule = attendanceSchedule;
-
-      user.preferences = {
-        ...(user.preferences || {}),
-        attendanceSchedule,
-      };
+      user.preferences = { ...(user.preferences || {}), attendanceSchedule };
     }
 
     if (workSchedule !== undefined) {
       user.workSchedule = workSchedule;
-
-      user.preferences = {
-        ...(user.preferences || {}),
-        workSchedule,
-      };
+      user.preferences = { ...(user.preferences || {}), workSchedule };
     }
 
-    if (
-      attendanceSettings !== undefined &&
-      typeof attendanceSettings === "object"
-    ) {
+    if (attendanceSettings !== undefined) {
+      if (!attendanceSettings || typeof attendanceSettings !== "object" || Array.isArray(attendanceSettings)) {
+        return res.status(400).json({ success: false, message: "Attendance settings must be an object." });
+      }
       user.attendanceSettings = {
         ...(user.attendanceSettings || {}),
         ...attendanceSettings,
@@ -378,7 +328,6 @@ const updateProfile = async (req, res) => {
     user.markModified("attendanceSettings");
 
     await user.save();
-
     const safeUserData = safeUser(user);
 
     return res.status(200).json({
@@ -391,72 +340,57 @@ const updateProfile = async (req, res) => {
     console.error("Update profile error:", error);
 
     if (error.name === "ValidationError") {
-      const messages = Object.values(error.errors).map(
-        (err) => err.message
-      );
-
+      const messages = Object.values(error.errors || {}).map((err) => err.message);
       return res.status(400).json({
         success: false,
-        message: messages.join(" "),
+        message: messages.join(" ") || "Invalid profile details.",
       });
     }
 
-    return res.status(500).json({
-      success: false,
-      message: "Server error.",
-    });
+    return res.status(500).json({ success: false, message: "Server error." });
   }
 };
 
 // ==========================================
-// PATCH /api/auth/change-password
-// PUT /api/auth/change-password
+// PATCH/PUT /api/auth/change-password
 // Change Password
 // ==========================================
 const changePassword = async (req, res) => {
   try {
-    const { currentPassword, newPassword } = req.body;
+    const { currentPassword, newPassword } = req.body || {};
 
-    if (!currentPassword || !newPassword) {
+    if (
+      typeof currentPassword !== "string" ||
+      typeof newPassword !== "string" ||
+      !currentPassword ||
+      !newPassword
+    ) {
       return res.status(400).json({
         success: false,
-        message:
-          "Current password and new password are required.",
+        message: "Current password and new password are required.",
       });
     }
 
     if (newPassword.length < 6) {
       return res.status(400).json({
         success: false,
-        message:
-          "New password must be at least 6 characters.",
+        message: "New password must be at least 6 characters.",
       });
     }
 
-    const user = await User.findById(req.user._id).select(
-      "+password"
-    );
-
+    const user = await User.findById(req.user._id).select("+password");
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found.",
-      });
+      return res.status(404).json({ success: false, message: "User not found." });
     }
 
-    if (
-      user.isDeleted === true ||
-      user.isActive === false
-    ) {
+    if (isAccountInactive(user)) {
       return res.status(403).json({
         success: false,
         message: "Your account is no longer active.",
       });
     }
 
-    const isMatch =
-      await user.comparePassword(currentPassword);
-
+    const isMatch = await user.comparePassword(currentPassword);
     if (!isMatch) {
       return res.status(401).json({
         success: false,
@@ -474,10 +408,15 @@ const changePassword = async (req, res) => {
   } catch (error) {
     console.error("Change password error:", error);
 
-    return res.status(500).json({
-      success: false,
-      message: "Server error.",
-    });
+    if (error.name === "ValidationError") {
+      const messages = Object.values(error.errors || {}).map((err) => err.message);
+      return res.status(400).json({
+        success: false,
+        message: messages.join(" ") || "Invalid password.",
+      });
+    }
+
+    return res.status(500).json({ success: false, message: "Server error." });
   }
 };
 
@@ -487,16 +426,9 @@ const changePassword = async (req, res) => {
 // ==========================================
 const logout = (req, res) => {
   res.clearCookie("token", getCookieOptions());
-
-  return res.status(200).json({
-    success: true,
-    message: "Logout successful.",
-  });
+  return res.status(200).json({ success: true, message: "Logout successful." });
 };
 
-// ==========================================
-// Export Controllers
-// ==========================================
 module.exports = {
   register,
   login,

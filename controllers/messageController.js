@@ -88,6 +88,14 @@ const safeMessage = (msg, currentUserId = null) => {
         : [],
     isRead: Boolean(msg.isRead),
     readAt: msg.readAt || null,
+    reactions: Array.isArray(msg.reactions)
+      ? msg.reactions
+      : Array.isArray(msg.metadata?.reactions)
+        ? msg.metadata.reactions
+        : [],
+    channel: msg.channel || "chat",
+    direction: msg.direction || "internal",
+    metadata: msg.metadata || {},
     isDeletedForEveryone: deletedForEveryone,
     isDeletedForMe: deletedForMe,
     deletedForEveryoneAt: msg.deletedForEveryoneAt || null,
@@ -659,6 +667,23 @@ const sendMessage = async (req, res) => {
         ? [resolvedRecipientId]
         : [];
 
+    const allowedMessageTypes = new Set([
+      "text",
+      "image",
+      "file",
+      "document",
+      "video",
+      "audio",
+      "system",
+    ]);
+
+    if (messageType && !allowedMessageTypes.has(String(messageType))) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid message type.",
+      });
+    }
+
     const calculatedMessageType =
       attachments.length > 0
         ? determineMessageType(
@@ -895,6 +920,13 @@ const updateMessage = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "Cannot edit a deleted message.",
+      });
+    }
+
+    if (getDeletedForUser(msg, req.user._id)) {
+      return res.status(404).json({
+        success: false,
+        message: "Message not found.",
       });
     }
 
@@ -1464,6 +1496,136 @@ const deleteMessage = async (req, res) => {
 };
 
 // =====================================================
+// MESSAGE REACTIONS
+// =====================================================
+
+const reactToMessage = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const emoji = String(req.body?.emoji || "").trim();
+
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid message ID.",
+      });
+    }
+
+    // Limit reaction payloads to a single emoji (including joined emoji).
+    if (!emoji || emoji.length > 32) {
+      return res.status(400).json({
+        success: false,
+        message: "A valid emoji reaction is required.",
+      });
+    }
+
+    const msg = await Message.findById(id);
+
+    if (!msg || msg.isDeletedForEveryone || getDeletedForUser(msg, req.user._id)) {
+      return res.status(404).json({
+        success: false,
+        message: "Message not found.",
+      });
+    }
+
+    const role = getUserRole(req.user);
+    const conversation = await Conversation.findById(msg.conversation)
+      .select("participants userId")
+      .lean();
+
+    if (
+      !conversation ||
+      !canAccessConversation(conversation, req.user._id, role)
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "You cannot access this conversation.",
+      });
+    }
+
+    const userId = String(req.user._id);
+    const metadata =
+      msg.metadata && typeof msg.metadata === "object"
+        ? { ...msg.metadata.toObject?.() || msg.metadata }
+        : {};
+
+    const reactions = Array.isArray(metadata.reactions)
+      ? [...metadata.reactions]
+      : [];
+
+    const existingIndex = reactions.findIndex(
+      (reaction) => String(reaction.userId) === userId
+    );
+
+    // Clicking the same emoji toggles it off. A different emoji replaces
+    // the current user's reaction, keeping one reaction per user per message.
+    if (existingIndex >= 0 && reactions[existingIndex].emoji === emoji) {
+      reactions.splice(existingIndex, 1);
+    } else {
+      const reaction = {
+        userId,
+        emoji,
+        createdAt: new Date(),
+      };
+
+      if (existingIndex >= 0) reactions[existingIndex] = reaction;
+      else reactions.push(reaction);
+    }
+
+    metadata.reactions = reactions;
+    msg.metadata = metadata;
+    msg.markModified("metadata");
+    await msg.save();
+
+    const populated = await populateMessage(
+      Message.findById(msg._id)
+    ).lean();
+    const formatted = safeMessage(populated, req.user._id);
+    const payload = {
+      conversationId: String(msg.conversation),
+      messageId: String(msg._id),
+      reactions: formatted.reactions,
+      message: formatted,
+      userId,
+    };
+
+    const io = getIo(req);
+    if (io) {
+      emitToConversation(
+        io,
+        msg.conversation,
+        "message_reaction_updated",
+        payload
+      );
+
+      const participantIds = getParticipantIds(conversation);
+      for (const participantId of participantIds) {
+        emitToUserOutsideConversation(
+          io,
+          participantId,
+          msg.conversation,
+          "message_reaction_updated",
+          payload
+        );
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Reaction updated successfully.",
+      data: formatted,
+      reactions: formatted.reactions,
+    });
+  } catch (error) {
+    console.error("[Messages] reactToMessage:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error updating message reaction.",
+    });
+  }
+};
+
+// =====================================================
 // EXPORTS
 // =====================================================
 
@@ -1478,4 +1640,5 @@ module.exports = {
   deleteMessage,
   deleteMessageForMe,
   deleteMessageForEveryone,
+  reactToMessage,
 };

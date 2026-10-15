@@ -117,6 +117,7 @@ const MessageSchema = new mongoose.Schema(
       default: null,
     },
 
+    // Mixed metadata keeps compatibility with existing documents and reactions.
     metadata: {
       type: mongoose.Schema.Types.Mixed,
       default: {},
@@ -176,6 +177,7 @@ MessageSchema.pre("validate", function (next) {
  * users may legitimately send the same text more than once.
  */
 MessageSchema.index({ conversation: 1, createdAt: 1 });
+MessageSchema.index({ conversation: 1, createdAt: -1 });
 MessageSchema.index({ recipient: 1, isRead: 1 });
 MessageSchema.index({ sender: 1, createdAt: -1 });
 MessageSchema.index({ conversation: 1, deletedFor: 1 });

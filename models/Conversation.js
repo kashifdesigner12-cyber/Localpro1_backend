@@ -13,11 +13,8 @@ const ConversationSchema = new mongoose.Schema(
       default: [],
       validate: {
         validator: function (participants) {
-          if (this.isGroup) {
-            return participants.length >= 2;
-          }
-
-          return participants.length >= 2;
+          // Both direct and group conversations need at least two participants.
+          return Array.isArray(participants) && participants.length >= 2;
         },
         message: 'A conversation must have at least two participants.'
       }
@@ -31,7 +28,15 @@ const ConversationSchema = new mongoose.Schema(
     groupName: {
       type: String,
       default: '',
-      trim: true
+      trim: true,
+      maxlength: 100,
+      validate: {
+        validator: function (value) {
+          // A group name is optional for direct conversations.
+          return !this.isGroup || (typeof value === 'string' && value.trim().length > 0);
+        },
+        message: 'A group conversation must have a name.'
+      }
     },
 
     groupAdmin: {
@@ -42,7 +47,9 @@ const ConversationSchema = new mongoose.Schema(
 
     lastMessage: {
       type: String,
-      default: ''
+      default: '',
+      trim: true,
+      maxlength: 5000
     },
 
     lastMessageType: {
@@ -105,7 +112,7 @@ const ConversationSchema = new mongoose.Schema(
   }
 );
 
-// Indexes for conversation lookup and sorting
+// Efficiently find conversations for a participant and sort by latest activity.
 ConversationSchema.index({
   participants: 1,
   lastMessageAt: -1
@@ -119,9 +126,12 @@ ConversationSchema.index({
   lastMessageAt: -1
 });
 
-// Keep conversation metadata updated whenever a document is saved
+// Keep updatedAt aligned with the latest message timestamp when applicable.
 ConversationSchema.pre('save', function (next) {
-  if (this.lastMessageAt && this.lastMessageAt > this.updatedAt) {
+  if (
+    this.lastMessageAt &&
+    (!this.updatedAt || this.lastMessageAt > this.updatedAt)
+  ) {
     this.updatedAt = this.lastMessageAt;
   }
 

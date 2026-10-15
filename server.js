@@ -15,6 +15,7 @@ const jwt = require("jsonwebtoken");
 
 const connectDB = require("./config/db");
 const Conversation = require("./models/Conversation");
+const User = require("./models/User");
 
 const {
   startAttendanceEmailScheduler,
@@ -224,7 +225,7 @@ function replyToSocket(callback, result) {
 // =====================================================
 
 // Every socket must provide a valid JWT.
-io.use((socket, next) => {
+io.use(async (socket, next) => {
   try {
     if (!process.env.JWT_SECRET) {
       console.error("[Socket.IO] JWT_SECRET is not configured.");
@@ -244,8 +245,16 @@ io.use((socket, next) => {
       return next(new Error("Invalid authentication token."));
     }
 
-    socket.data.userId = userId;
-    socket.data.role = getDecodedRole(decoded);
+    // Read the current role from MongoDB rather than trusting a possibly
+    // stale role claim embedded in the JWT. Also reject deleted accounts.
+    const user = await User.findById(userId).select("_id role").lean();
+
+    if (!user) {
+      return next(new Error("Authenticated user no longer exists."));
+    }
+
+    socket.data.userId = String(user._id);
+    socket.data.role = String(user.role || getDecodedRole(decoded)).toLowerCase();
 
     return next();
   } catch (error) {
