@@ -5,9 +5,13 @@ const path = require("path");
 const crypto = require("crypto");
 const multer = require("multer");
 
-const UPLOAD_ROOT = path.resolve(__dirname, "..", "uploads", "chat");
+const UPLOAD_BASE = path.resolve(__dirname, "..", "uploads");
+const UPLOAD_ROOT = path.join(UPLOAD_BASE, "chat");
+const TASK_UPLOAD_ROOT = path.join(UPLOAD_BASE, "tasks");
+
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB per file
-const MAX_FILES = 5;
+const MAX_FILES = 5; // Maximum files per chat upload request
+const MAX_TASK_FILES = 21; // task fields allow 1 file + 10 files + 10 attachments
 
 const ALLOWED_EXTENSIONS = new Set([
   ".jpg",
@@ -38,48 +42,65 @@ const ALLOWED_MIME_TYPES = new Set([
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 ]);
 
-// Ensure the upload directory exists before Multer receives files.
+// Create both upload directories before Multer receives files.
 fs.mkdirSync(UPLOAD_ROOT, { recursive: true });
+fs.mkdirSync(TASK_UPLOAD_ROOT, { recursive: true });
 
-const storage = multer.diskStorage({
-  destination(req, file, callback) {
-    callback(null, UPLOAD_ROOT);
-  },
+function createStorage(destinationRoot) {
+  return multer.diskStorage({
+    destination(req, file, callback) {
+      callback(null, destinationRoot);
+    },
 
-  filename(req, file, callback) {
-    // Keep only the extension; never use the user-supplied filename as the
-    // stored filename. Random bytes reduce collision/predictability risk.
-    const extension = path.extname(file.originalname || "").toLowerCase();
-    const safeName = `${Date.now()}-${crypto.randomBytes(16).toString("hex")}${extension}`;
-
-    callback(null, safeName);
-  },
-});
-
-function fileFilter(req, file, callback) {
-  const extension = path.extname(file.originalname || "").toLowerCase();
-  const mimeType = String(file.mimetype || "").toLowerCase();
-
-  if (
-    !ALLOWED_EXTENSIONS.has(extension) ||
-    !ALLOWED_MIME_TYPES.has(mimeType)
-  ) {
-    const error = new Error("Unsupported attachment file type.");
-    error.code = "CHAT_FILE_TYPE_NOT_ALLOWED";
-    return callback(error);
-  }
-
-  return callback(null, true);
+    filename(req, file, callback) {
+      // Never use the user-supplied filename as the stored filename.
+      const extension = path.extname(file.originalname || "").toLowerCase();
+      const safeName = `${Date.now()}-${crypto.randomBytes(16).toString("hex")}${extension}`;
+      callback(null, safeName);
+    },
+  });
 }
 
+function createFileFilter(codePrefix) {
+  return function fileFilter(req, file, callback) {
+    const extension = path.extname(file.originalname || "").toLowerCase();
+    const mimeType = String(file.mimetype || "").toLowerCase();
+
+    if (
+      !ALLOWED_EXTENSIONS.has(extension) ||
+      !ALLOWED_MIME_TYPES.has(mimeType)
+    ) {
+      const error = new Error("Unsupported attachment file type.");
+      error.code = `${codePrefix}_FILE_TYPE_NOT_ALLOWED`;
+      return callback(error);
+    }
+
+    return callback(null, true);
+  };
+}
+
+// Chat uploads are stored in uploads/chat and limited to 5 files per request.
 const uploadChatAttachments = multer({
-  storage,
-  fileFilter,
+  storage: createStorage(UPLOAD_ROOT),
+  fileFilter: createFileFilter("CHAT"),
   limits: {
     fileSize: MAX_FILE_SIZE,
     files: MAX_FILES,
     fields: 20,
     parts: MAX_FILES + 20,
+  },
+});
+
+// Task uploads are stored separately in uploads/tasks.
+// taskRoutes.js should use uploadTaskAttachments.fields([...]) for task routes.
+const uploadTaskAttachments = multer({
+  storage: createStorage(TASK_UPLOAD_ROOT),
+  fileFilter: createFileFilter("TASK"),
+  limits: {
+    fileSize: MAX_FILE_SIZE,
+    files: MAX_TASK_FILES,
+    fields: 30,
+    parts: MAX_TASK_FILES + 30,
   },
 });
 
@@ -91,11 +112,10 @@ function handleUploadError(error, req, res, next) {
 
     if (error.code === "LIMIT_FILE_SIZE") {
       message = "Attachment exceeds the 10 MB size limit.";
-    } else if (
-      error.code === "LIMIT_FILE_COUNT" ||
-      error.code === "LIMIT_UNEXPECTED_FILE"
-    ) {
-      message = `A maximum of ${MAX_FILES} attachments is allowed, or an unexpected file field was sent.`;
+    } else if (error.code === "LIMIT_FILE_COUNT") {
+      message = `Too many attachments were uploaded. Chat uploads allow up to ${MAX_FILES} files; task upload limits are controlled by the task route fields.`;
+    } else if (error.code === "LIMIT_UNEXPECTED_FILE") {
+      message = "An unexpected file field was submitted, or that field contains too many files.";
     } else if (error.code === "LIMIT_FIELD_COUNT") {
       message = "Too many form fields were submitted.";
     } else if (error.code === "LIMIT_PART_COUNT") {
@@ -109,7 +129,10 @@ function handleUploadError(error, req, res, next) {
     });
   }
 
-  if (error.code === "CHAT_FILE_TYPE_NOT_ALLOWED") {
+  if (
+    error.code === "CHAT_FILE_TYPE_NOT_ALLOWED" ||
+    error.code === "TASK_FILE_TYPE_NOT_ALLOWED"
+  ) {
     return res.status(415).json({
       success: false,
       message: error.message,
@@ -122,8 +145,11 @@ function handleUploadError(error, req, res, next) {
 
 module.exports = {
   uploadChatAttachments,
+  uploadTaskAttachments,
   handleUploadError,
   MAX_FILE_SIZE,
   MAX_FILES,
+  MAX_TASK_FILES,
   UPLOAD_ROOT,
+  TASK_UPLOAD_ROOT,
 };

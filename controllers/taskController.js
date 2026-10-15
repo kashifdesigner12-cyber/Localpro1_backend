@@ -146,7 +146,7 @@ const getUploadedAttachments = (req) => {
       const url =
         file.secure_url ||
         file.url ||
-        (file.filename ? `/uploads/${file.filename}` : file.path) ||
+        (file.filename ? `/uploads/tasks/${file.filename}` : file.path) ||
         "";
 
       return {

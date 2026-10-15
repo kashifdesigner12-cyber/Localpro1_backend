@@ -504,8 +504,16 @@ const loadRouter = (routePath) => {
 // =====================================================
 
 const uploadsDir = path.join(__dirname, "uploads");
+const chatUploadsDir = path.join(uploadsDir, "chat");
+const taskUploadsDir = path.join(uploadsDir, "tasks");
 
-fs.mkdirSync(uploadsDir, { recursive: true });
+// Ensure the upload root and both uploader destinations exist on deployment.
+// The /uploads static mount below serves files from these subdirectories as:
+//   /uploads/chat/<filename>
+//   /uploads/tasks/<filename>
+for (const directory of [uploadsDir, chatUploadsDir, taskUploadsDir]) {
+  fs.mkdirSync(directory, { recursive: true });
+}
 
 // =====================================================
 // EXPRESS MIDDLEWARE

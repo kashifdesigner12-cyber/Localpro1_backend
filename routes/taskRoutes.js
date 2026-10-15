@@ -1,3 +1,5 @@
+"use strict";
+
 const express = require("express");
 
 const {
@@ -17,7 +19,11 @@ const {
 } = require("../controllers/taskController");
 
 const { protect } = require("../middleware/authMiddleware");
-const upload = require("../middleware/uploadMiddleware");
+
+const {
+  uploadTaskAttachments,
+  handleUploadError,
+} = require("../middleware/uploadMiddleware");
 
 const router = express.Router();
 
@@ -30,6 +36,15 @@ const handleAttachmentUpload =
 
 // Authentication applied to all routes
 router.use(protect);
+
+// Task uploads use a separate Multer instance and uploads/tasks directory.
+const taskUploadFields = uploadTaskAttachments.fields([
+  { name: "file", maxCount: 1 },
+  { name: "files", maxCount: 10 },
+  { name: "attachments", maxCount: 10 },
+]);
+
+const taskUpload = [taskUploadFields, handleUploadError];
 
 // ============================================================================
 // STATIC TASK ROUTES (Must come before /:id)
@@ -44,15 +59,7 @@ router.get("/stats", getTaskStats);
 
 router.get("/", getAllTasks);
 
-router.post(
-  "/",
-  upload.fields([
-    { name: "file", maxCount: 1 },
-    { name: "files", maxCount: 10 },
-    { name: "attachments", maxCount: 10 },
-  ]),
-  createTask
-);
+router.post("/", ...taskUpload, createTask);
 
 // ============================================================================
 // TASK ATTACHMENTS
@@ -60,11 +67,7 @@ router.post(
 
 router.post(
   "/:id/attachments",
-  upload.fields([
-    { name: "file", maxCount: 1 },
-    { name: "files", maxCount: 10 },
-    { name: "attachments", maxCount: 10 },
-  ]),
+  ...taskUpload,
   handleAttachmentUpload
 );
 
@@ -91,25 +94,9 @@ router.get("/:id", getTaskById);
 // UPDATE TASK
 // ============================================================================
 
-router.put(
-  "/:id",
-  upload.fields([
-    { name: "file", maxCount: 1 },
-    { name: "files", maxCount: 10 },
-    { name: "attachments", maxCount: 10 },
-  ]),
-  updateTask
-);
+router.put("/:id", ...taskUpload, updateTask);
 
-router.patch(
-  "/:id",
-  upload.fields([
-    { name: "file", maxCount: 1 },
-    { name: "files", maxCount: 10 },
-    { name: "attachments", maxCount: 10 },
-  ]),
-  updateTask
-);
+router.patch("/:id", ...taskUpload, updateTask);
 
 router.patch("/:id/status", updateTask);
 router.put("/:id/status", updateTask);
