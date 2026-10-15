@@ -15,7 +15,13 @@ const {
 } = require("../controllers/messageController");
 
 const { protect } = require("../middleware/authMiddleware");
-const upload = require("../middleware/uploadMiddleware");
+
+// The upload middleware exports an object containing the configured Multer
+// instances and upload error handler. Use the chat-attachment instance here.
+const {
+  uploadChatAttachments,
+  handleUploadError,
+} = require("../middleware/uploadMiddleware");
 
 const router = express.Router();
 
@@ -30,8 +36,20 @@ router.get("/detail/:id", getMessageById);
 
 // Send endpoints kept for current and legacy frontend compatibility.
 // The client should call only one endpoint for each send action.
-router.post("/", upload.any(), sendMessage);
-router.post("/send", upload.any(), sendMessage);
+// `uploadChatAttachments` is the configured Multer instance, so `.any()`
+// is called on that instance rather than on the exported middleware object.
+router.post(
+  "/",
+  uploadChatAttachments.any(),
+  handleUploadError,
+  sendMessage
+);
+router.post(
+  "/send",
+  uploadChatAttachments.any(),
+  handleUploadError,
+  sendMessage
+);
 
 // Mark all unread messages in a conversation as read.
 router.put("/read/:conversationId", markMessagesAsRead);
