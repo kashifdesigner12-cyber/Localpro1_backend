@@ -454,7 +454,7 @@ const sendMessage = async (req, res) => {
 
     for (const file of incomingFiles) {
       attachments.push({
-        url: `/uploads/${file.filename}`,
+        url: `/uploads/chat/${file.filename}`,
         filename: file.filename,
         originalName: file.originalname,
         fileType: String(file.mimetype || "").split("/")[0] || "file",
