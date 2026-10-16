@@ -71,6 +71,25 @@ const MessageSchema = new mongoose.Schema(
       },
     ],
 
+    // Added reactions support for Microsoft Teams / WhatsApp style chat
+    reactions: [
+      {
+        emoji: {
+          type: String,
+          required: true,
+        },
+        userId: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+          required: true,
+        },
+        createdAt: {
+          type: Date,
+          default: Date.now,
+        },
+      },
+    ],
+
     isRead: {
       type: Boolean,
       default: false,
@@ -117,7 +136,6 @@ const MessageSchema = new mongoose.Schema(
       default: null,
     },
 
-    // Mixed metadata keeps compatibility with existing documents and reactions.
     metadata: {
       type: mongoose.Schema.Types.Mixed,
       default: {},
@@ -128,10 +146,6 @@ const MessageSchema = new mongoose.Schema(
   }
 );
 
-/**
- * Keep body and message synchronized.
- * Allow attachment-only messages.
- */
 MessageSchema.pre("validate", function (next) {
   if (this.isDeletedForEveryone) {
     return next();
@@ -151,7 +165,6 @@ MessageSchema.pre("validate", function (next) {
   } else if (normalizedMessage && !normalizedBody) {
     this.body = normalizedMessage;
   } else if (normalizedBody && normalizedMessage) {
-    // Prefer body as the canonical text when both fields are supplied.
     this.body = normalizedBody;
     this.message = normalizedBody;
   }
@@ -171,11 +184,6 @@ MessageSchema.pre("validate", function (next) {
   next();
 });
 
-/**
- * Query indexes.
- * These improve reads but intentionally do not enforce uniqueness:
- * users may legitimately send the same text more than once.
- */
 MessageSchema.index({ conversation: 1, createdAt: 1 });
 MessageSchema.index({ conversation: 1, createdAt: -1 });
 MessageSchema.index({ recipient: 1, isRead: 1 });

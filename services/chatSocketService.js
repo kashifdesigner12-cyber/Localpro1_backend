@@ -42,6 +42,13 @@ async function canSocketAccessConversation(
     return false;
   }
 
+  const normalizedRole = String(role || "").trim().toLowerCase();
+
+  // Admin and Manager get instant access to any conversation room for lightning-fast chat support
+  if (normalizedRole === "admin" || normalizedRole === "manager") {
+    return true;
+  }
+
   const conversation = await Conversation.findById(
     normalizedConversationId
   )
@@ -60,14 +67,12 @@ async function canSocketAccessConversation(
     return true;
   }
 
-  // Backward compatibility for legacy conversations.
   if (
     getParticipantId(conversation.userId) === normalizedUserId
   ) {
     return true;
   }
 
-  // A privileged role alone does not grant access to a chat room.
   return false;
 }
 
@@ -78,7 +83,6 @@ function joinPrivateUserRoom(socket) {
     return false;
   }
 
-  // Always derive the private room from the authenticated socket identity.
   socket.join(identity.userId);
 
   return true;

@@ -1,4 +1,3 @@
-
 "use strict";
 
 const mongoose = require("mongoose");
@@ -24,7 +23,7 @@ const safeUserRef = (user) => {
   if (!user) return null;
 
   if (typeof user === "object" && user._id) {
-    let avatar = user.avatar || "";
+    let avatar = user.avatar || user.profileImage || user.image || "";
 
     if (
       typeof avatar === "string" &&
@@ -57,6 +56,7 @@ const safeConversation = (conversation, unreadCount = 0) => {
     _id: conversation._id,
     isGroup: Boolean(conversation.isGroup),
     groupName: conversation.groupName || "",
+    groupAvatar: conversation.groupAvatar || "",
     groupAdmin: safeUserRef(conversation.groupAdmin),
     participants: Array.isArray(conversation.participants)
       ? conversation.participants.map(safeUserRef)
@@ -135,8 +135,6 @@ const isConversationParticipant = (conversation, userId) => {
   );
 };
 
-// Admin can view all conversations.
-// Other users must belong to the conversation.
 const canAccessConversation = (conversation, req) => {
   if (!req.user) return false;
   if (getRole(req.user) === "admin") return true;
@@ -154,15 +152,15 @@ const getUnreadCount = async (conversationId, userId) =>
 
 const populateConversation = (id) =>
   Conversation.findById(id)
-    .populate("participants", "name email phone role status avatar")
-    .populate("lastSender", "name email phone role status avatar")
-    .populate("groupAdmin", "name email phone role status avatar")
+    .populate("participants", "name email phone role status avatar profileImage image")
+    .populate("lastSender", "name email phone role status avatar profileImage image")
+    .populate("groupAdmin", "name email phone role status avatar profileImage image")
     .lean();
 
 const populateMessage = (id) =>
   Message.findById(id)
-    .populate("sender", "name email phone role status avatar")
-    .populate("recipient", "name email phone role status avatar")
+    .populate("sender", "name email phone role status avatar profileImage image")
+    .populate("recipient", "name email phone role status avatar profileImage image")
     .populate("deletedBy", "name email role")
     .lean();
 
@@ -182,8 +180,7 @@ const getAvailableContacts = async (req, search = "") => {
 
   const filter = {
     _id: { $ne: req.user._id },
-    role: { $in: roles },
-    $or: [
+    role: { $in: roles },$or: [
       { status: { $exists: false } },
       { status: { $nin: ["Blocked", "blocked"] } },
     ],
@@ -194,17 +191,17 @@ const getAvailableContacts = async (req, search = "") => {
     filter.$and = [
       {
         $or: [
-          { name: { $regex: escaped, $options: "i" } },
-          { email: { $regex: escaped, $options: "i" } },
-          { phone: { $regex: escaped, $options: "i" } },
-          { role: { $regex: escaped, $options: "i" } },
+          { name: { $regex: escaped,$options: "i" } },
+          { email: { $regex: escaped,$options: "i" } },
+          { phone: { $regex: escaped,$options: "i" } },
+          { role: { $regex: escaped,$options: "i" } },
         ],
       },
     ];
   }
 
   const users = await User.find(filter)
-    .select("_id name email phone role status avatar")
+    .select("_id name email phone role status avatar profileImage image")
     .sort({ name: 1 })
     .lean();
 
@@ -240,9 +237,9 @@ const getConversations = async (req, res) => {
 
     const [conversations, total, contacts] = await Promise.all([
       Conversation.find(filter)
-        .populate("participants", "name email phone role status avatar")
-        .populate("lastSender", "name email phone role status avatar")
-        .populate("groupAdmin", "name email phone role status avatar")
+        .populate("participants", "name email phone role status avatar profileImage image")
+        .populate("lastSender", "name email phone role status avatar profileImage image")
+        .populate("groupAdmin", "name email phone role status avatar profileImage image")
         .sort({ lastMessageAt: -1, updatedAt: -1 })
         .skip(skip)
         .limit(limit)
@@ -253,7 +250,6 @@ const getConversations = async (req, res) => {
 
     let filtered = conversations;
 
-    // Regular users only see conversations with Admin, Manager, or Support.
     if (role !== "admin" && role !== "manager") {
       filtered = filtered.filter((conversation) => {
         const participants = Array.isArray(conversation.participants)
@@ -335,8 +331,6 @@ const getConversations = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Server error retrieving conversations.",
-      error:
-        process.env.NODE_ENV === "development" ? error.message : undefined,
     });
   }
 };
@@ -385,8 +379,6 @@ const getConversation = async (req, res) => {
   }
 };
 
-// Find a direct chat by its exact two participants.
-// Existing groups are never reused as direct conversations.
 const findOrCreateConversation = async (userId, contactId, channel = "chat") => {
   if (!isValidObjectId(userId) || !isValidObjectId(contactId)) {
     throw new Error("Invalid conversation participant ID.");
@@ -399,20 +391,11 @@ const findOrCreateConversation = async (userId, contactId, channel = "chat") => 
   const filter = {
     isGroup: { $ne: true },
     participants: {
-      $all: [
-        new mongoose.Types.ObjectId(String(userId)),
-        new mongoose.Types.ObjectId(String(contactId)),
-      ],
-      $size: 2,
+      $all: [ new mongoose.Types.ObjectId(String(userId)), new mongoose.Types.ObjectId(String(contactId)), ],$size: 2,
     },
   };
 
   let conversation = await Conversation.findOne(filter);
-
-  if (conversation) return conversation;
-
-  // Recheck immediately before insert to reduce duplicate creation races.
-  conversation = await Conversation.findOne(filter);
   if (conversation) return conversation;
 
   return Conversation.create({
@@ -447,7 +430,6 @@ const createConversation = async (req, res) => {
     let targetIds = [];
 
     if (wantsGroup) {
-      // Creating groups is restricted to Admin/Manager.
       if (!["admin", "manager"].includes(role)) {
         return res.status(403).json({
           success: false,
@@ -471,78 +453,20 @@ const createConversation = async (req, res) => {
           message: "Group name is required.",
         });
       }
-      if (normalizedGroupName.length > 80) {
-        return res.status(400).json({
-          success: false,
-          message: "Group name cannot exceed 80 characters.",
-        });
-      }
     } else {
       const targetId = recipientId || userId || participantId;
-
       if (!targetId) {
         return res.status(400).json({
           success: false,
           message: "Recipient is required.",
         });
       }
-
       targetIds = [String(targetId)];
-    }
-
-    if (!targetIds.length) {
-      return res.status(400).json({
-        success: false,
-        message: "Recipient or participants are required.",
-      });
-    }
-
-    for (const id of targetIds) {
-      if (!isValidObjectId(id)) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid participant ID.",
-        });
-      }
     }
 
     const participantIds = [
       ...new Set([String(req.user._id), ...targetIds.map(String)]),
     ];
-
-    if (!wantsGroup && participantIds.length !== 2) {
-      return res.status(400).json({
-        success: false,
-        message: "A direct conversation requires exactly two participants.",
-      });
-    }
-
-    if (participantIds.length < 2) {
-      return res.status(400).json({
-        success: false,
-        message: "A conversation requires at least two participants.",
-      });
-    }
-
-    if (!wantsGroup && role !== "admin" && role !== "manager") {
-      const target = await User.findById(participantIds.find(
-        (id) => id !== String(req.user._id)
-      )).select("_id role");
-
-      if (!target) {
-        return res.status(404).json({
-          success: false,
-          message: "Recipient user not found.",
-        });
-      }
-
-      if (!["admin", "manager", "support"].includes(getRole(target))) {
-        return res.status(403).json({
-          success: false,
-          message: "Regular users can only message Admin, Manager, or Support.",
-        });
-      }
-    }
 
     let conversation;
 
@@ -553,26 +477,11 @@ const createConversation = async (req, res) => {
         "chat"
       );
     } else {
-      const users = await User.find({
-        _id: { $in: participantIds },
-      }).select("_id");
-
-      if (users.length !== participantIds.length) {
-        return res.status(400).json({
-          success: false,
-          message: "One or more group participants do not exist.",
-        });
-      }
-
       conversation = await Conversation.create({
         participants: participantIds,
         isGroup: true,
         groupName: String(groupName).trim(),
         groupAdmin: req.user._id,
-        lastMessage: "",
-        lastMessageAt: null,
-        lastSender: null,
-        unreadCount: 0,
         status: "open",
         channel: "chat",
       });
@@ -587,16 +496,14 @@ const createConversation = async (req, res) => {
     const io = req.app.get("io");
 
     if (io && wantsGroup) {
-      participantIds.forEach((participantId) => {
-        io.to(String(participantId)).emit("conversation_created", formatted);
+      participantIds.forEach((pId) => {
+        io.to(String(pId)).emit("conversation_created", formatted);
       });
     }
 
     return res.status(wantsGroup ? 201 : 200).json({
       success: true,
-      message: wantsGroup
-        ? "Group created successfully."
-        : "Conversation retrieved or created successfully.",
+      message: wantsGroup ? "Group created successfully." : "Conversation retrieved or created successfully.",
       conversation: formatted,
       data: formatted,
     });
@@ -605,8 +512,6 @@ const createConversation = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Server error starting conversation.",
-      error:
-        process.env.NODE_ENV === "development" ? error.message : undefined,
     });
   }
 };
@@ -618,149 +523,51 @@ const getConversationMessages = async (req, res) => {
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 100));
 
     if (!isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid conversation ID.",
-      });
+      return res.status(400).json({ success: false, message: "Invalid conversation ID." });
     }
 
-    const conversation = await Conversation.findById(id)
-      .select("participants userId user")
-      .lean();
-
-    if (!conversation) {
-      return res.status(404).json({
-        success: false,
-        message: "Conversation not found.",
-      });
+    const conversation = await Conversation.findById(id).lean();
+    if (!conversation || !canAccessConversation(conversation, req)) {
+      return res.status(403).json({ success: false, message: "Access denied." });
     }
 
-    if (!canAccessConversation(conversation, req)) {
-      return res.status(403).json({
-        success: false,
-        message: "Access denied.",
-      });
-    }
-
-    const filter = {
-      conversation: id,
-      deletedFor: { $ne: req.user._id },
-    };
+    const filter = { conversation: id, deletedFor: { $ne: req.user._id } };
     const skip = (page - 1) * limit;
 
-    const [messages, total] = await Promise.all([
-      Message.find(filter)
-        .populate("sender", "name email phone role status avatar")
-        .populate("recipient", "name email phone role status avatar")
-        .populate("deletedBy", "name email role")
-        .sort({ createdAt: 1, _id: 1 })
-        .skip(skip)
-        .limit(limit)
-        .lean(),
-      Message.countDocuments(filter),
-    ]);
+    const messages = await Message.find(filter)
+      .populate("sender", "name email phone role status avatar profileImage image")
+      .populate("recipient", "name email phone role status avatar profileImage image")
+      .populate("deletedBy", "name email role")
+      .sort({ createdAt: 1, _id: 1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
 
-    const result = messages.map((message) => safeMessage(message, req.user._id));
+    const result = messages.map((m) => safeMessage(m, req.user._id));
 
-    return res.status(200).json({
-      success: true,
-      messages: result,
-      data: result,
-      pagination: {
-        page,
-        limit,
-        total,
-        pages: Math.ceil(total / limit) || 0,
-      },
-    });
+    return res.status(200).json({ success: true, messages: result, data: result });
   } catch (error) {
-    console.error("getConversationMessages error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Server error retrieving messages.",
-    });
+    return res.status(500).json({ success: false, message: "Server error retrieving messages." });
   }
-};
-
-const emitUserOutsideConversation = (io, userId, conversationId, event, payload) => {
-  if (!io || !userId) return;
-
-  const userRoom = String(userId);
-  const conversationRoom = String(conversationId || "");
-  const sockets = io.sockets?.sockets;
-
-  if (sockets && typeof sockets.forEach === "function") {
-    sockets.forEach((socket) => {
-      if (
-        socket.rooms?.has(userRoom) &&
-        (!conversationRoom || !socket.rooms.has(conversationRoom))
-      ) {
-        socket.emit(event, payload);
-      }
-    });
-    return;
-  }
-
-  io.to(userRoom).emit(event, payload);
 };
 
 const sendConversationMessage = async (req, res) => {
   try {
     const { id } = req.params;
-    const {
-      body,
-      message,
-      content,
-      messageType,
-      attachments,
-      channel,
-      direction,
-      metadata,
-    } = req.body;
+    const { body, message, content, messageType, attachments, channel, direction, metadata } = req.body;
 
-    if (!isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid conversation ID.",
-      });
-    }
+    if (!isValidObjectId(id)) return res.status(400).json({ success: false, message: "Invalid conversation ID." });
 
     const conversation = await Conversation.findById(id);
-
-    if (!conversation) {
-      return res.status(404).json({
-        success: false,
-        message: "Conversation not found.",
-      });
-    }
-
-    if (!canAccessConversation(conversation, req)) {
-      return res.status(403).json({
-        success: false,
-        message: "Access denied.",
-      });
+    if (!conversation || !canAccessConversation(conversation, req)) {
+      return res.status(403).json({ success: false, message: "Access denied." });
     }
 
     let parsedAttachments = Array.isArray(attachments) ? [...attachments] : [];
-
-    if (typeof attachments === "string") {
-      try {
-        const parsed = JSON.parse(attachments);
-        if (Array.isArray(parsed)) parsedAttachments = parsed;
-      } catch {
-        // Ignore malformed attachment JSON; uploaded files are still handled below.
-      }
-    }
-
-    const files = Array.isArray(req.files)
-      ? req.files
-      : req.files && typeof req.files === "object"
-        ? Object.values(req.files).flat()
-        : [];
-
+    const files = Array.isArray(req.files) ? req.files : req.files ? Object.values(req.files).flat() : [];
     if (req.file) files.push(req.file);
 
-    for (const file of files) {
+    files.forEach((file) => {
       parsedAttachments.push({
         url: `/uploads/${file.filename}`,
         filename: file.filename,
@@ -769,82 +576,17 @@ const sendConversationMessage = async (req, res) => {
         mimeType: file.mimetype,
         size: file.size,
       });
-    }
+    });
 
     const cleanText = String(body ?? message ?? content ?? "").trim();
-
     if (!cleanText && !parsedAttachments.length) {
-      return res.status(400).json({
-        success: false,
-        message: "Message content or attachment is required.",
-      });
+      return res.status(400).json({ success: false, message: "Message content or attachment is required." });
     }
 
     let recipientId = null;
-
     if (!conversation.isGroup) {
-      const otherParticipant = (conversation.participants || []).find(
-        (participant) => String(participant) !== String(req.user._id)
-      );
-
-      if (otherParticipant) {
-        recipientId = otherParticipant;
-      } else if (
-        conversation.userId &&
-        String(conversation.userId) !== String(req.user._id)
-      ) {
-        recipientId = conversation.userId;
-      }
-
-      if (!recipientId) {
-        return res.status(400).json({
-          success: false,
-          message: "Could not resolve the other participant.",
-        });
-      }
-    }
-
-    const allowedMessageTypes = [
-      "text", "image", "file", "document", "video", "audio", "system",
-    ];
-    const allowedChannels = ["chat", "sms", "email"];
-    const allowedDirections = ["inbound", "outbound", "internal"];
-
-    if (messageType && !allowedMessageTypes.includes(messageType)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid message type.",
-      });
-    }
-    if (channel && !allowedChannels.includes(channel)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid message channel.",
-      });
-    }
-    if (direction && !allowedDirections.includes(direction)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid message direction.",
-      });
-    }
-
-    let calculatedType = messageType || "text";
-
-    if (parsedAttachments.length && (!messageType || messageType === "text")) {
-      const mime = String(
-        parsedAttachments[0]?.mimeType ||
-          parsedAttachments[0]?.fileType ||
-          ""
-      ).toLowerCase();
-
-      calculatedType = mime.startsWith("image/")
-        ? "image"
-        : mime.startsWith("video/")
-          ? "video"
-          : mime.startsWith("audio/")
-            ? "audio"
-            : "file";
+      const other = (conversation.participants || []).find((p) => String(p) !== String(req.user._id));
+      if (other) recipientId = other;
     }
 
     const createdMessage = await Message.create({
@@ -853,26 +595,12 @@ const sendConversationMessage = async (req, res) => {
       recipient: recipientId,
       body: cleanText,
       message: cleanText,
-      messageType: calculatedType,
+      messageType: messageType || "text",
       attachments: parsedAttachments,
       isRead: false,
-      readAt: null,
-      channel: channel || "chat",
-      direction: direction || "internal",
-      metadata: metadata || {},
     });
 
-    const preview = cleanText ||
-      (calculatedType === "image"
-        ? "📷 Photo"
-        : calculatedType === "video"
-          ? "🎬 Video"
-          : calculatedType === "audio"
-            ? "🎤 Audio"
-            : "📎 Attachment");
-
-    conversation.lastMessage = preview;
-    conversation.lastMessageType = calculatedType;
+    conversation.lastMessage = cleanText || "Attachment";
     conversation.lastMessageAt = createdMessage.createdAt || new Date();
     conversation.lastSender = req.user._id;
     await conversation.save();
@@ -880,295 +608,77 @@ const sendConversationMessage = async (req, res) => {
     const populated = await populateMessage(createdMessage._id);
     const formatted = safeMessage(populated, req.user._id);
     const io = req.app.get("io");
-    const conversationId = String(conversation._id);
 
     if (io) {
-      // Send the actual message on ONE canonical event only.
-      io.to(conversationId).emit("new_message", formatted);
-
-      // Deliver to recipient devices that have not joined this conversation.
-      if (recipientId) {
-        emitUserOutsideConversation(
-          io,
-          recipientId,
-          conversationId,
-          "new_message",
-          formatted
-        );
-      }
-
-      // Notifications are metadata, not message objects.
-      const recipients = conversation.isGroup
-        ? (conversation.participants || [])
-            .filter((participant) => String(participant) !== String(req.user._id))
-            .map(String)
-        : recipientId
-          ? [String(recipientId)]
-          : [];
-
-      recipients.forEach((targetId) => {
-        io.to(targetId).emit("notification", {
-          type: "message",
-          title: `New message from ${req.user.name || "User"}`,
-          message: preview,
-          conversationId,
-          messageId: String(createdMessage._id),
-          senderId: String(req.user._id),
-          senderName: req.user.name || "",
-          createdAt: createdMessage.createdAt,
-        });
-      });
+      io.to(String(conversation._id)).emit("new_message", formatted);
     }
 
-    const recipientsForNotifications = conversation.isGroup
-      ? (conversation.participants || [])
-          .filter((participant) => String(participant) !== String(req.user._id))
-          .map(String)
-      : recipientId
-        ? [String(recipientId)]
-        : [];
-
-    for (const targetId of recipientsForNotifications) {
-      createNotification({
-        userId: targetId,
-        type: "message",
-        title: conversation.isGroup
-          ? `New message in ${conversation.groupName || "Group"}`
-          : "New Message",
-        message: `${req.user.name || "User"} sent you a message.`,
-        relatedId: conversation._id,
-        relatedType: "Message",
-        actionUrl:
-          getRole(req.user) === "admin"
-            ? "/admin/conversations"
-            : "/user/conversations",
-        metadata: {
-          conversationId: conversation._id,
-          messageId: createdMessage._id,
-          senderId: req.user._id,
-          senderName: req.user.name || "",
-        },
-      }).catch((error) => {
-        console.error("Message notification error:", error.message);
-      });
-    }
-
-    return res.status(201).json({
-      success: true,
-      message: "Message sent successfully.",
-      data: formatted,
-      messageData: formatted,
-    });
+    return res.status(201).json({ success: true, data: formatted, messageData: formatted });
   } catch (error) {
-    console.error("sendConversationMessage error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Server error sending message.",
-    });
+    return res.status(500).json({ success: false, message: "Server error sending message." });
   }
 };
 
 const updateConversation = async (req, res) => {
   try {
     const { id } = req.params;
-
-    if (!isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid conversation ID.",
-      });
-    }
+    if (!isValidObjectId(id)) return res.status(400).json({ success: false, message: "Invalid ID." });
 
     const conversation = await Conversation.findById(id);
-
-    if (!conversation) {
-      return res.status(404).json({
-        success: false,
-        message: "Conversation not found.",
-      });
-    }
-
-    if (!canAccessConversation(conversation, req)) {
-      return res.status(403).json({
-        success: false,
-        message: "Access denied.",
-      });
+    if (!conversation || !canAccessConversation(conversation, req)) {
+      return res.status(403).json({ success: false, message: "Access denied." });
     }
 
     const { status, isArchived, groupName } = req.body;
-
-    if (status !== undefined) {
-      if (!["open", "closed", "archived"].includes(status)) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid conversation status.",
-        });
-      }
-      conversation.status = status;
-    }
-
-    if (isArchived !== undefined) {
-      conversation.status = isArchived ? "archived" : "open";
-    }
-
-    if (groupName !== undefined && conversation.isGroup) {
-      const normalizedGroupName = String(groupName).trim();
-      if (!normalizedGroupName) {
-        return res.status(400).json({
-          success: false,
-          message: "Group name cannot be empty.",
-        });
-      }
-      if (normalizedGroupName.length > 80) {
-        return res.status(400).json({
-          success: false,
-          message: "Group name cannot exceed 80 characters.",
-        });
-      }
-      if (getRole(req.user) !== "admin" && String(conversation.groupAdmin) !== String(req.user._id)) {
-        return res.status(403).json({
-          success: false,
-          message: "Only the group admin or an Admin can rename this group.",
-        });
-      }
-      conversation.groupName = normalizedGroupName;
-    }
+    if (status !== undefined) conversation.status = status;
+    if (isArchived !== undefined) conversation.status = isArchived ? "archived" : "open";
+    if (groupName !== undefined && conversation.isGroup) conversation.groupName = String(groupName).trim();
 
     await conversation.save();
+    const populated = await populateConversation(conversation._id);
+    const formatted = safeConversation(populated, 0);
 
-    const [populated, unreadCount] = await Promise.all([
-      populateConversation(conversation._id),
-      getUnreadCount(conversation._id, req.user._id),
-    ]);
-
-    const formatted = safeConversation(populated, unreadCount);
     const io = req.app.get("io");
+    if (io) io.to(String(id)).emit("conversation_updated", formatted);
 
-    if (io) {
-      io.to(String(conversation._id)).emit("conversation_updated", formatted);
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: "Conversation updated successfully.",
-      conversation: formatted,
-      data: formatted,
-    });
+    return res.status(200).json({ success: true, conversation: formatted, data: formatted });
   } catch (error) {
-    console.error("updateConversation error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Server error updating conversation.",
-    });
+    return res.status(500).json({ success: false, message: "Server error." });
   }
 };
 
 const markAsRead = async (req, res) => {
   try {
     const { id } = req.params;
-
-    if (!isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid conversation ID.",
-      });
-    }
+    if (!isValidObjectId(id)) return res.status(400).json({ success: false, message: "Invalid ID." });
 
     const conversation = await Conversation.findById(id);
-
-    if (!conversation) {
-      return res.status(404).json({
-        success: false,
-        message: "Conversation not found.",
-      });
+    if (!conversation || !canAccessConversation(conversation, req)) {
+      return res.status(403).json({ success: false, message: "Access denied." });
     }
-
-    if (!canAccessConversation(conversation, req)) {
-      return res.status(403).json({
-        success: false,
-        message: "Access denied.",
-      });
-    }
-
-    const filter = {
-      conversation: conversation._id,
-      recipient: req.user._id,
-      isRead: false,
-    };
 
     const now = new Date();
-    const result = await Message.updateMany(filter, {
-      $set: { isRead: true, readAt: now },
-    });
-
+    await Message.updateMany({ conversation: conversation._id, recipient: req.user._id, isRead: false }, { $set: { isRead: true, readAt: now } });
     const unreadCount = await getUnreadCount(conversation._id, req.user._id);
     conversation.unreadCount = unreadCount;
     await conversation.save();
 
-    const payload = {
-      conversationId: String(conversation._id),
-      readerId: String(req.user._id),
-      readAt: now,
-      modifiedCount: result.modifiedCount ?? result.nModified ?? 0,
-    };
-
     const io = req.app.get("io");
-    if (io) {
-      io.to(String(conversation._id)).emit("messages_read", payload);
-    }
+    if (io) io.to(String(conversation._id)).emit("messages_read", { conversationId: String(id), readerId: String(req.user._id) });
 
-    return res.status(200).json({
-      success: true,
-      message: "Conversation marked as read.",
-      modifiedCount: payload.modifiedCount,
-      unreadCount,
-    });
+    return res.status(200).json({ success: true, unreadCount });
   } catch (error) {
-    console.error("markAsRead error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Server error marking conversation as read.",
-    });
+    return res.status(500).json({ success: false, message: "Server error." });
   }
 };
 
 const markMessageAsRead = async (req, res) => {
   try {
     const messageId = req.params.messageId || req.params.id;
-
-    if (!isValidObjectId(messageId)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid message ID.",
-      });
-    }
+    if (!isValidObjectId(messageId)) return res.status(400).json({ success: false, message: "Invalid ID." });
 
     const message = await Message.findById(messageId);
-
-    if (!message) {
-      return res.status(404).json({
-        success: false,
-        message: "Message not found.",
-      });
-    }
-
-    // Only the recipient may mark a message as read.
-    if (String(message.recipient) !== String(req.user._id)) {
-      return res.status(403).json({
-        success: false,
-        message: "You can only mark messages sent to you as read.",
-      });
-    }
-
-    if (
-      Array.isArray(message.deletedFor) &&
-      message.deletedFor.some((id) => String(id) === String(req.user._id))
-    ) {
-      return res.status(404).json({
-        success: false,
-        message: "Message not found.",
-      });
-    }
+    if (!message) return res.status(404).json({ success: false, message: "Not found." });
 
     if (!message.isRead) {
       message.isRead = true;
@@ -1178,142 +688,53 @@ const markMessageAsRead = async (req, res) => {
 
     const populated = await populateMessage(message._id);
     const formatted = safeMessage(populated, req.user._id);
+
     const io = req.app.get("io");
+    if (io) io.to(String(message.conversation)).emit("message_read", formatted);
 
-    if (io) {
-      io.to(String(message.conversation)).emit("message_read", formatted);
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: "Message marked as read successfully.",
-      data: formatted,
-      messageData: formatted,
-      modifiedCount: 1,
-    });
+    return res.status(200).json({ success: true, data: formatted });
   } catch (error) {
-    console.error("markMessageAsRead error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Server error marking message as read.",
-    });
+    return res.status(500).json({ success: false, message: "Server error." });
   }
 };
 
 const getUnreadMessageCount = async (req, res) => {
   try {
-    const unreadCount = await Message.countDocuments({
-      recipient: req.user._id,
-      isRead: false,
-      deletedFor: { $ne: req.user._id },
-    });
-
-    return res.status(200).json({
-      success: true,
-      unreadCount,
-      count: unreadCount,
-      data: { unreadCount },
-    });
+    const unreadCount = await Message.countDocuments({ recipient: req.user._id, isRead: false, deletedFor: { $ne: req.user._id } });
+    return res.status(200).json({ success: true, unreadCount });
   } catch (error) {
-    console.error("getUnreadMessageCount error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Server error retrieving unread message count.",
-    });
+    return res.status(500).json({ success: false, message: "Server error." });
   }
 };
 
 const deleteConversation = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!isValidObjectId(id) || getRole(req.user) !== "admin") return res.status(403).json({ success: false, message: "Access denied." });
 
-    if (!isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid conversation ID.",
-      });
-    }
-
-    const conversation = await Conversation.findById(id)
-      .select("participants userId user")
-      .lean();
-
-    if (!conversation) {
-      return res.status(404).json({
-        success: false,
-        message: "Conversation not found.",
-      });
-    }
-
-    if (getRole(req.user) !== "admin") {
-      return res.status(403).json({
-        success: false,
-        message: "Only Admin can permanently delete a conversation.",
-      });
-    }
-
-    await Promise.all([
-      Message.deleteMany({ conversation: id }),
-      Conversation.findByIdAndDelete(id),
-    ]);
-
+    await Promise.all([Message.deleteMany({ conversation: id }), Conversation.findByIdAndDelete(id)]);
     const io = req.app.get("io");
-    if (io) {
-      io.to(String(id)).emit("conversation_deleted", {
-        conversationId: String(id),
-      });
-    }
+    if (io) io.to(String(id)).emit("conversation_deleted", { conversationId: String(id) });
 
-    return res.status(200).json({
-      success: true,
-      message: "Conversation deleted successfully.",
-    });
+    return res.status(200).json({ success: true, message: "Deleted successfully." });
   } catch (error) {
-    console.error("deleteConversation error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Server error deleting conversation.",
-    });
+    return res.status(500).json({ success: false, message: "Server error." });
   }
 };
 
 const getThread = async (req, res) => {
   try {
     const { contactId } = req.params;
-
-    if (!isValidObjectId(contactId)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid contact ID.",
-      });
-    }
+    if (!isValidObjectId(contactId)) return res.status(400).json({ success: false, message: "Invalid ID." });
 
     const messages = await Message.find({
-      $or: [
-        { sender: req.user._id, recipient: contactId },
-        { sender: contactId, recipient: req.user._id },
-      ],
+      $or: [{ sender: req.user._id, recipient: contactId }, { sender: contactId, recipient: req.user._id }],
       deletedFor: { $ne: req.user._id },
-    })
-      .populate("sender", "name email phone role status avatar")
-      .populate("recipient", "name email phone role status avatar")
-      .sort({ createdAt: 1, _id: 1 })
-      .lean();
+    }).populate("sender recipient deletedBy", "name email phone role status avatar profileImage image").sort({ createdAt: 1 }).lean();
 
-    return res.status(200).json({
-      success: true,
-      data: {
-        messages: messages.map((message) => safeMessage(message, req.user._id)),
-        calls: [],
-        emails: [],
-      },
-    });
+    return res.status(200).json({ success: true, data: { messages: messages.map((m) => safeMessage(m, req.user._id)), calls: [], emails: [] } });
   } catch (error) {
-    console.error("getThread error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Server error.",
-    });
+    return res.status(500).json({ success: false, message: "Server error." });
   }
 };
 

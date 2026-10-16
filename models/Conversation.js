@@ -13,7 +13,6 @@ const ConversationSchema = new mongoose.Schema(
       default: [],
       validate: {
         validator: function (participants) {
-          // Both direct and group conversations need at least two participants.
           return Array.isArray(participants) && participants.length >= 2;
         },
         message: 'A conversation must have at least two participants.'
@@ -32,11 +31,16 @@ const ConversationSchema = new mongoose.Schema(
       maxlength: 100,
       validate: {
         validator: function (value) {
-          // A group name is optional for direct conversations.
           return !this.isGroup || (typeof value === 'string' && value.trim().length > 0);
         },
         message: 'A group conversation must have a name.'
       }
+    },
+
+    groupAvatar: {
+      type: String,
+      default: '',
+      trim: true
     },
 
     groupAdmin: {
@@ -112,7 +116,6 @@ const ConversationSchema = new mongoose.Schema(
   }
 );
 
-// Efficiently find conversations for a participant and sort by latest activity.
 ConversationSchema.index({
   participants: 1,
   lastMessageAt: -1
@@ -126,7 +129,6 @@ ConversationSchema.index({
   lastMessageAt: -1
 });
 
-// Keep updatedAt aligned with the latest message timestamp when applicable.
 ConversationSchema.pre('save', function (next) {
   if (
     this.lastMessageAt &&
