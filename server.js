@@ -188,11 +188,7 @@ function getTokenFromSocket(socket) {
 
   const bearerToken = authorization.replace(/^Bearer\s+/i, "");
 
-  return (
-    socket.handshake.auth?.token ||
-    bearerToken ||
-    null
-  );
+  return socket.handshake.auth?.token || bearerToken || null;
 }
 
 function getDecodedUserId(decoded) {
@@ -208,9 +204,9 @@ function getDecodedUserId(decoded) {
 function getDecodedRole(decoded) {
   return String(
     decoded?.role ||
-    decoded?.userRole ||
-    decoded?.accountType ||
-    ""
+      decoded?.userRole ||
+      decoded?.accountType ||
+      ""
   ).toLowerCase();
 }
 
@@ -224,7 +220,6 @@ function replyToSocket(callback, result) {
 // SOCKET AUTHENTICATION
 // =====================================================
 
-// Every socket must provide a valid JWT.
 io.use(async (socket, next) => {
   try {
     if (!process.env.JWT_SECRET) {
@@ -245,16 +240,18 @@ io.use(async (socket, next) => {
       return next(new Error("Invalid authentication token."));
     }
 
-    // Read the current role from MongoDB rather than trusting a possibly
-    // stale role claim embedded in the JWT. Also reject deleted accounts.
-    const user = await User.findById(userId).select("_id role").lean();
+    const user = await User.findById(userId)
+      .select("_id role")
+      .lean();
 
     if (!user) {
       return next(new Error("Authenticated user no longer exists."));
     }
 
     socket.data.userId = String(user._id);
-    socket.data.role = String(user.role || getDecodedRole(decoded)).toLowerCase();
+    socket.data.role = String(
+      user.role || getDecodedRole(decoded)
+    ).toLowerCase();
 
     return next();
   } catch (error) {
@@ -271,38 +268,81 @@ io.use(async (socket, next) => {
 // =====================================================
 
 async function canJoinConversation(userId, role, conversationId) {
-  if (
-    typeof conversationId !== "string" ||
-    !mongoose.Types.ObjectId.isValid(conversationId)
-  ) {
+  try {
+    if (
+      typeof conversationId !== "string" ||
+      !mongoose.Types.ObjectId.isValid(conversationId)
+    ) {
+      return false;
+    }
+
+    const normalizedUserId = String(userId);
+    const normalizedRole = String(role || "").toLowerCase();
+
+    const conversation = await Conversation.findById(conversationId)
+      .select("participants isGroup")
+      .populate("participants", "_id role")
+      .lean();
+
+    if (!conversation) return false;
+
+    // Preserve the existing administrative access policy.
+    if (normalizedRole === "admin") {
+      return true;
+    }
+
+    // Regular users and managers cannot join group conversations.
+    if (conversation.isGroup === true) {
+      return false;
+    }
+
+    const participants = Array.isArray(conversation.participants)
+      ? conversation.participants
+      : [];
+
+    const participantIds = [
+      ...new Set(
+        participants
+          .map((participant) =>
+            String(participant?._id || participant || "")
+          )
+          .filter(Boolean)
+      ),
+    ];
+
+    // A non-admin must be one of exactly two participants.
+    if (
+      participantIds.length !== 2 ||
+      !participantIds.includes(normalizedUserId)
+    ) {
+      return false;
+    }
+
+    const otherParticipantId = participantIds.find(
+      (participantId) => participantId !== normalizedUserId
+    );
+
+    if (!otherParticipantId) return false;
+
+    const otherParticipant = participants.find(
+      (participant) =>
+        String(participant?._id || participant || "") ===
+        otherParticipantId
+    );
+
+    // Non-admin users may only access their own Admin conversation.
+    return (
+      String(otherParticipant?.role || "").toLowerCase() === "admin"
+    );
+  } catch (error) {
+    console.error(
+      "[Socket.IO] Conversation access check failed:",
+      error.message
+    );
+
+    // If access cannot be verified, deny access.
     return false;
   }
-
-  const conversation = await Conversation.findById(conversationId)
-    .select("participants userId isGroup")
-    .lean();
-
-  if (!conversation) return false;
-
-  const participantIds = (conversation.participants || []).map(
-    (participant) => String(participant?._id || participant)
-  );
-
-  if (participantIds.includes(String(userId))) {
-    return true;
-  }
-
-  // Support legacy conversations that store userId.
-  if (String(conversation.userId || "") === String(userId)) {
-    return true;
-  }
-
-  // Preserve the existing administrative access policy.
-  if (role === "admin" || role === "manager") {
-    return true;
-  }
-
-  return false;
 }
 
 // =====================================================
@@ -311,18 +351,17 @@ async function canJoinConversation(userId, role, conversationId) {
 
 io.on("connection", (socket) => {
   const connectedAt = Date.now();
-
   const connectedUserId = socket.data.userId;
   const connectedUserRole = socket.data.role || "";
 
   console.log(
     `[Socket.IO] Connected: ${socket.id}; ` +
-    `user=${connectedUserId}; ` +
-    `transport=${socket.conn.transport.name}; ` +
-    `origin=${socket.handshake.headers.origin || "none"}`
+      `user=${connectedUserId}; ` +
+      `transport=${socket.conn.transport.name}; ` +
+      `origin=${socket.handshake.headers.origin || "none"}`
   );
 
-  // Private room: controllers can continue using io.to(userId).
+  // Private room for the authenticated user.
   socket.join(connectedUserId);
 
   addActiveSocket(connectedUserId, socket.id);
@@ -332,7 +371,7 @@ io.on("connection", (socket) => {
     status: "online",
   });
 
-  // Legacy event retained. It cannot impersonate another user.
+  // A user can join only their own private room.
   socket.on("user_join", (requestedUserId, callback) => {
     if (
       !requestedUserId ||
@@ -354,7 +393,7 @@ io.on("connection", (socket) => {
     });
   });
 
-  // Join a conversation only after verifying access.
+  // Join a conversation only after checking permissions.
   socket.on("join_room", async (roomId, callback) => {
     if (typeof roomId !== "string" || !roomId.trim()) {
       replyToSocket(callback, {
@@ -382,7 +421,7 @@ io.on("connection", (socket) => {
 
         console.warn(
           `[Socket.IO] Rejected room join: ` +
-          `user=${connectedUserId}, room=${normalizedRoomId}`
+            `user=${connectedUserId}, room=${normalizedRoomId}`
         );
 
         return;
@@ -397,7 +436,7 @@ io.on("connection", (socket) => {
     } catch (error) {
       console.error(
         "[Socket.IO] Room authorization error:",
-        error
+        error.message
       );
 
       replyToSocket(callback, {
@@ -447,7 +486,7 @@ io.on("connection", (socket) => {
 
     console.log(
       `[Socket.IO] User ${connectedUserId} disconnected: ${reason}; ` +
-      `connected for ${Date.now() - connectedAt}ms`
+        `connected for ${Date.now() - connectedAt}ms`
     );
   });
 
@@ -507,11 +546,11 @@ const uploadsDir = path.join(__dirname, "uploads");
 const chatUploadsDir = path.join(uploadsDir, "chat");
 const taskUploadsDir = path.join(uploadsDir, "tasks");
 
-// Ensure the upload root and both uploader destinations exist on deployment.
-// The /uploads static mount below serves files from these subdirectories as:
-//   /uploads/chat/<filename>
-//   /uploads/tasks/<filename>
-for (const directory of [uploadsDir, chatUploadsDir, taskUploadsDir]) {
+for (const directory of [
+  uploadsDir,
+  chatUploadsDir,
+  taskUploadsDir,
+]) {
   fs.mkdirSync(directory, { recursive: true });
 }
 

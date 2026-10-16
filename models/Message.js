@@ -71,12 +71,12 @@ const MessageSchema = new mongoose.Schema(
       },
     ],
 
-    // Added reactions support for Microsoft Teams / WhatsApp style chat
     reactions: [
       {
         emoji: {
           type: String,
           required: true,
+          trim: true,
         },
         userId: {
           type: mongoose.Schema.Types.ObjectId,
@@ -171,7 +171,7 @@ MessageSchema.pre("validate", function (next) {
 
   const hasText = Boolean(
     (this.body && this.body.trim()) ||
-    (this.message && this.message.trim())
+      (this.message && this.message.trim())
   );
 
   if (!hasText && !hasAttachments) {

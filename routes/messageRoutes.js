@@ -1,3 +1,5 @@
+"use strict";
+
 const express = require("express");
 
 const {
@@ -16,8 +18,6 @@ const {
 
 const { protect } = require("../middleware/authMiddleware");
 
-// The upload middleware exports an object containing the configured Multer
-// instances and upload error handler. Use the chat-attachment instance here.
 const {
   uploadChatAttachments,
   handleUploadError,
@@ -25,25 +25,26 @@ const {
 
 const router = express.Router();
 
-// All message endpoints require authentication.
+// All message routes require authentication.
 router.use(protect);
 
-// Static routes must be declared before generic ID routes.
+// Unread message count.
 router.get("/unread-count", getUnreadMessageCount);
 router.get("/unread", getUnreadMessageCount);
+
+// Message details.
 router.get("/single/:id", getMessageById);
 router.get("/detail/:id", getMessageById);
 
-// Send endpoints kept for current and legacy frontend compatibility.
-// The client should call only one endpoint for each send action.
-// `uploadChatAttachments` is the configured Multer instance, so `.any()`
-// is called on that instance rather than on the exported middleware object.
+// Send messages and attachments.
+// Role and conversation permissions are enforced in messageController.
 router.post(
   "/",
   uploadChatAttachments.any(),
   handleUploadError,
   sendMessage
 );
+
 router.post(
   "/send",
   uploadChatAttachments.any(),
@@ -51,31 +52,31 @@ router.post(
   sendMessage
 );
 
-// Mark all unread messages in a conversation as read.
+// Mark conversation messages as read.
 router.put("/read/:conversationId", markMessagesAsRead);
 router.patch("/read/:conversationId", markMessagesAsRead);
 
-// Mark an individual message as read.
+// Mark individual messages as read.
 router.put("/messages/:messageId/read", markSingleMessageAsRead);
 router.patch("/messages/:messageId/read", markSingleMessageAsRead);
 router.put("/:id/read", markSingleMessageAsRead);
 router.patch("/:id/read", markSingleMessageAsRead);
 
-// Add or update a reaction; expected body: { emoji: "👍" }.
+// Message reactions.
 router.post("/:id/reactions", reactToMessage);
 
-// Delete a message only for the authenticated user.
+// Delete a message for the current user.
 router.post("/:id/delete-for-me", deleteMessageForMe);
 router.patch("/:id/delete-for-me", deleteMessageForMe);
 router.delete("/:id/me", deleteMessageForMe);
 
-// Delete a message for all participants.
+// Delete a message for everyone.
 router.post("/:id/delete-for-everyone", deleteMessageForEveryone);
 router.patch("/:id/delete-for-everyone", deleteMessageForEveryone);
 router.delete("/:id/everyone", deleteMessageForEveryone);
 
-// Fetch messages for a conversation. Message detail routes use explicit
-// /single/:id or /detail/:id paths to avoid ambiguity with conversation IDs.
+// Fetch conversation messages.
+router.get("/", getMessages);
 router.get("/:conversationId", getMessages);
 
 // Update or delete an individual message.
