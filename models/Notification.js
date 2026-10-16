@@ -1,46 +1,68 @@
-const mongoose = require("mongoose");
+
+const mongoose = require('mongoose');
 
 const { Schema } = mongoose;
 
+const NOTIFICATION_TYPES = [
+  'task',
+  'message',
+  'mention',
+  'alert',
+  'leave',
+  'system',
+  'appointment',
+  'call',
+  'event',
+  'attendance',
+];
+
+const RELATED_TYPES = [
+  'Task',
+  'Message',
+  'Conversation',
+  'LeaveRequest',
+  'User',
+  'System',
+  'Call',
+  'Appointment',
+  'Event',
+  'Attendance',
+];
+
 const notificationSchema = new Schema(
   {
-    // The authenticated user who owns this notification.
+    // User who owns this notification.
     user: {
       type: Schema.Types.ObjectId,
-      ref: "User",
-      required: [true, "User is required"],
+      ref: 'User',
+      required: [true, 'User is required'],
+      index: false,
     },
 
-    relatedType: {
+    // Notification category used by filters and frontend UI.
+    type: {
       type: String,
-      enum: [
-        "Task",
-        "Message",
-        "Conversation",
-        "LeaveRequest",
-        "User",
-        "System",
-        "Call",
-        "Appointment",
-        "Event",
-        "Attendance",
-        null,
-      ],
-      default: null,
+      enum: {
+        values: NOTIFICATION_TYPES,
+        message: 'Invalid notification type',
+      },
+      default: 'system',
+      required: true,
+      index: false,
     },
 
     title: {
       type: String,
-      required: [true, "Title is required"],
+      required: [true, 'Title is required'],
       trim: true,
-      maxlength: [200, "Title cannot exceed 200 characters"],
+      maxlength: [200, 'Title cannot exceed 200 characters'],
     },
 
     message: {
       type: String,
-      required: [true, "Message is required"],
+      required: [true, 'Message is required'],
       trim: true,
-      maxlength: [5000, "Message cannot exceed 5000 characters"],
+      maxlength: [5000, 'Message cannot exceed 5000 characters'],
     },
 
     isRead: {
@@ -61,30 +83,25 @@ const notificationSchema = new Schema(
 
     relatedType: {
       type: String,
-      enum: [
-        "Task",
-        "Message",
-        "LeaveRequest",
-        "User",
-        "System",
-        "Call",
-        "Appointment",
-        "Event",
-        "Attendance",
-        null,
-      ],
+      enum: {
+        values: [...RELATED_TYPES, null],
+        message: 'Invalid related notification type',
+      },
       default: null,
     },
 
     actionUrl: {
       type: String,
-      default: "",
+      default: '',
       trim: true,
-      maxlength: [2048, "Action URL cannot exceed 2048 characters"],
+      maxlength: [
+        2048,
+        'Action URL cannot exceed 2048 characters',
+      ],
     },
 
-    // Treat metadata as untrusted input. Validate and whitelist fields at the
-    // controller/service boundary before storing or returning it to clients.
+    // Store optional additional notification data.
+    // Validate sensitive or client-facing metadata in the controller.
     metadata: {
       type: Schema.Types.Mixed,
       default: () => ({}),
@@ -93,13 +110,30 @@ const notificationSchema = new Schema(
   {
     timestamps: true,
     strict: true,
-  },
+  }
 );
 
-// Indexes are scoped by owner so notification reads can remain user-specific.
-// The compound indexes support common list, unread-count, and type-filter queries.
-notificationSchema.index({ user: 1, createdAt: -1 });
-notificationSchema.index({ user: 1, isRead: 1, createdAt: -1 });
-notificationSchema.index({ user: 1, type: 1, createdAt: -1 });
+// Efficient user-specific notification lists.
+notificationSchema.index({
+  user: 1,
+  createdAt: -1,
+});
 
-module.exports = mongoose.model("Notification", notificationSchema);
+// Efficient unread-count and unread-list queries.
+notificationSchema.index({
+  user: 1,
+  isRead: 1,
+  createdAt: -1,
+});
+
+// Efficient filtering by notification type.
+notificationSchema.index({
+  user: 1,
+  type: 1,
+  createdAt: -1,
+});
+
+module.exports = mongoose.model(
+  'Notification',
+  notificationSchema
+);

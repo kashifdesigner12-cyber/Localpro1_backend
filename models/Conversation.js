@@ -2,6 +2,16 @@
 
 const mongoose = require("mongoose");
 
+const MESSAGE_TYPES = [
+  "text",
+  "image",
+  "file",
+  "document",
+  "video",
+  "audio",
+  "system",
+];
+
 const ConversationSchema = new mongoose.Schema(
   {
     participants: {
@@ -41,6 +51,7 @@ const ConversationSchema = new mongoose.Schema(
       type: String,
       default: "",
       trim: true,
+      maxlength: 2048,
     },
 
     groupAdmin: {
@@ -69,21 +80,14 @@ const ConversationSchema = new mongoose.Schema(
 
     lastMessageType: {
       type: String,
-      enum: [
-        "text",
-        "image",
-        "file",
-        "document",
-        "video",
-        "audio",
-        "system",
-      ],
+      enum: MESSAGE_TYPES,
       default: "text",
     },
 
     lastMessageAt: {
       type: Date,
       default: null,
+      index: true,
     },
 
     lastSender: {
@@ -102,45 +106,47 @@ const ConversationSchema = new mongoose.Schema(
       type: String,
       enum: ["open", "closed", "archived"],
       default: "open",
+      index: true,
     },
 
     channel: {
       type: String,
       enum: ["chat", "sms", "email", "call", "multi"],
       default: "chat",
+      index: true,
     },
 
     userId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       default: null,
+      index: true,
     },
 
     contactId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Contact",
       default: null,
+      index: true,
     },
   },
   {
     timestamps: true,
+    minimize: false,
   }
 );
 
-ConversationSchema.index({
-  participants: 1,
-  lastMessageAt: -1,
-});
+// Supports listing a user's conversations with the newest activity first.
+ConversationSchema.index({ participants: 1, lastMessageAt: -1 });
 
-ConversationSchema.index({
-  updatedAt: -1,
-});
+// Supports general conversation-list sorting and legacy CRM conversation views.
+ConversationSchema.index({ updatedAt: -1 });
+ConversationSchema.index({ lastMessageAt: -1 });
 
-ConversationSchema.index({
-  lastMessageAt: -1,
-});
+// Supports channel/status filters used by CRM conversation lists.
+ConversationSchema.index({ channel: 1, status: 1, lastMessageAt: -1 });
 
-ConversationSchema.pre("save", function (next) {
+ConversationSchema.pre("save", function syncUpdatedAtWithLastMessageAt(next) {
   if (
     this.lastMessageAt &&
     (!this.updatedAt || this.lastMessageAt > this.updatedAt)
@@ -151,7 +157,4 @@ ConversationSchema.pre("save", function (next) {
   next();
 });
 
-module.exports = mongoose.model(
-  "Conversation",
-  ConversationSchema
-);
+module.exports = mongoose.model("Conversation", ConversationSchema);

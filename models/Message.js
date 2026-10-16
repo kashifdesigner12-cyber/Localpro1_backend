@@ -1,4 +1,16 @@
+"use strict";
+
 const mongoose = require("mongoose");
+
+const MESSAGE_TYPES = [
+  "text",
+  "image",
+  "file",
+  "document",
+  "video",
+  "audio",
+  "system",
+];
 
 const MessageSchema = new mongoose.Schema(
   {
@@ -29,6 +41,7 @@ const MessageSchema = new mongoose.Schema(
       default: "",
     },
 
+    // `message` is retained as a compatibility alias for older clients.
     message: {
       type: String,
       trim: true,
@@ -37,7 +50,7 @@ const MessageSchema = new mongoose.Schema(
 
     messageType: {
       type: String,
-      enum: ["text", "image", "file", "document", "video", "audio", "system"],
+      enum: MESSAGE_TYPES,
       default: "text",
     },
 
@@ -46,22 +59,27 @@ const MessageSchema = new mongoose.Schema(
         url: {
           type: String,
           required: true,
+          trim: true,
         },
         filename: {
           type: String,
           default: "",
+          trim: true,
         },
         originalName: {
           type: String,
           default: "",
+          trim: true,
         },
         fileType: {
           type: String,
           default: "",
+          trim: true,
         },
         mimeType: {
           type: String,
           default: "",
+          trim: true,
         },
         size: {
           type: Number,
@@ -77,6 +95,7 @@ const MessageSchema = new mongoose.Schema(
           type: String,
           required: true,
           trim: true,
+          maxlength: 32,
         },
         userId: {
           type: mongoose.Schema.Types.ObjectId,
@@ -146,6 +165,8 @@ const MessageSchema = new mongoose.Schema(
   }
 );
 
+// Normalize body/message compatibility and reject empty messages, while
+// allowing attachment-only messages and messages deleted for everyone.
 MessageSchema.pre("validate", function (next) {
   if (this.isDeletedForEveryone) {
     return next();
@@ -165,6 +186,7 @@ MessageSchema.pre("validate", function (next) {
   } else if (normalizedMessage && !normalizedBody) {
     this.body = normalizedMessage;
   } else if (normalizedBody && normalizedMessage) {
+    // Keep both fields synchronized for legacy clients.
     this.body = normalizedBody;
     this.message = normalizedBody;
   }
@@ -184,6 +206,7 @@ MessageSchema.pre("validate", function (next) {
   next();
 });
 
+// Query indexes for chronological history, unread counts, and sender history.
 MessageSchema.index({ conversation: 1, createdAt: 1 });
 MessageSchema.index({ conversation: 1, createdAt: -1 });
 MessageSchema.index({ recipient: 1, isRead: 1 });

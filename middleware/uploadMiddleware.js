@@ -10,15 +10,31 @@ const UPLOAD_ROOT = path.join(UPLOAD_BASE, "chat");
 const TASK_UPLOAD_ROOT = path.join(UPLOAD_BASE, "tasks");
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB per file
-const MAX_FILES = 5; // Maximum files per chat upload request
+const MAX_FILES = 20; // Keep chat upload limit aligned with messageController
 const MAX_TASK_FILES = 21; // task fields allow 1 file + 10 files + 10 attachments
 
 const ALLOWED_EXTENSIONS = new Set([
+  // Images
   ".jpg",
   ".jpeg",
   ".png",
   ".webp",
   ".gif",
+
+  // Video
+  ".mp4",
+  ".webm",
+  ".mov",
+  ".ogv",
+
+  // Audio
+  ".mp3",
+  ".wav",
+  ".m4a",
+  ".ogg",
+  ".aac",
+
+  // Documents and common files
   ".pdf",
   ".txt",
   ".csv",
@@ -29,10 +45,30 @@ const ALLOWED_EXTENSIONS = new Set([
 ]);
 
 const ALLOWED_MIME_TYPES = new Set([
+  // Images
   "image/jpeg",
   "image/png",
   "image/webp",
   "image/gif",
+
+  // Video
+  "video/mp4",
+  "video/webm",
+  "video/quicktime",
+  "video/ogg",
+
+  // Audio
+  "audio/mpeg",
+  "audio/mp3",
+  "audio/wav",
+  "audio/x-wav",
+  "audio/mp4",
+  "audio/x-m4a",
+  "audio/ogg",
+  "audio/aac",
+  "audio/aacp",
+
+  // Documents and common files
   "application/pdf",
   "text/plain",
   "text/csv",
@@ -79,7 +115,8 @@ function createFileFilter(codePrefix) {
   };
 }
 
-// Chat uploads are stored in uploads/chat and limited to 5 files per request.
+// Chat uploads are stored in uploads/chat.
+// Supports up to 20 files per request, with a 10 MB per-file limit.
 const uploadChatAttachments = multer({
   storage: createStorage(UPLOAD_ROOT),
   fileFilter: createFileFilter("CHAT"),
@@ -115,7 +152,8 @@ function handleUploadError(error, req, res, next) {
     } else if (error.code === "LIMIT_FILE_COUNT") {
       message = `Too many attachments were uploaded. Chat uploads allow up to ${MAX_FILES} files; task upload limits are controlled by the task route fields.`;
     } else if (error.code === "LIMIT_UNEXPECTED_FILE") {
-      message = "An unexpected file field was submitted, or that field contains too many files.";
+      message =
+        "An unexpected file field was submitted, or that field contains too many files.";
     } else if (error.code === "LIMIT_FIELD_COUNT") {
       message = "Too many form fields were submitted.";
     } else if (error.code === "LIMIT_PART_COUNT") {

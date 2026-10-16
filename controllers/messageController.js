@@ -4,68 +4,53 @@ const mongoose = require("mongoose");
 const Message = require("../models/Message");
 const Conversation = require("../models/Conversation");
 const User = require("../models/User");
+const { createNotification } = require("./notificationController");
+const { sendMessageNotificationEmail } = require("../utils/sendEmail");
 
 // =====================================================
 // HELPERS
 // =====================================================
 
 const isValidObjectId = (id) =>
-  Boolean(id) &&
-  typeof id !== "object" &&
-  mongoose.Types.ObjectId.isValid(String(id));
+  Boolean(id) && mongoose.Types.ObjectId.isValid(String(id));
 
 const toId = (value) => {
   if (!value) return null;
-  return String(value._id || value);
-};
 
-const getUserRole = (user) =>
-  String(user?.role || "").toLowerCase();
-
-const isAdmin = (user) => getUserRole(user) === "admin";
-
-const getIo = (req) => req.app.get("io");
-
-const getParticipantIds = (conversation) => {
-  const ids = Array.isArray(conversation?.participants)
-    ? conversation.participants.map(toId).filter(Boolean)
-    : [];
-
-  if (conversation?.userId) {
-    ids.push(toId(conversation.userId));
+  if (typeof value === "object" && value._id) {
+    return String(value._id);
   }
 
-  return [...new Set(ids)];
+  return String(value);
 };
 
 const safeUserRef = (user) => {
   if (!user) return null;
 
-  if (typeof user !== "object" || !user._id) {
-    return user;
+  if (typeof user === "object" && user._id) {
+    let avatar = user.avatar || null;
+
+    if (
+      typeof avatar === "string" &&
+      avatar.startsWith("data:image") &&
+      avatar.length > 1000
+    ) {
+      avatar = null;
+    }
+
+    return {
+      id: user._id,
+      _id: user._id,
+      name: user.name || "",
+      email: user.email || "",
+      phone: user.phone,
+      role: user.role || "",
+      status: user.status,
+      avatar,
+    };
   }
 
-  let avatar =
-    user.avatar || user.profileImage || user.image || null;
-
-  if (
-    typeof avatar === "string" &&
-    avatar.startsWith("data:image") &&
-    avatar.length > 1000
-  ) {
-    avatar = null;
-  }
-
-  return {
-    id: user._id,
-    _id: user._id,
-    name: user.name || "",
-    email: user.email || "",
-    role: user.role || "",
-    phone: user.phone,
-    status: user.status,
-    avatar,
-  };
+  return user;
 };
 
 const safeMessage = (msg, currentUserId = null) => {
@@ -77,32 +62,13 @@ const safeMessage = (msg, currentUserId = null) => {
     ? msg.deletedFor.map(String)
     : [];
 
+  const deletedForMe = currentUserId
+    ? deletedFor.includes(String(currentUserId))
+    : false;
+
   const body = deletedForEveryone
     ? "This message was deleted"
     : msg.body || msg.message || "";
-
-  const attachments = deletedForEveryone
-    ? []
-    : (Array.isArray(msg.attachments) ? msg.attachments : []).map(
-        (att) => {
-          const item =
-            typeof att.toObject === "function"
-              ? att.toObject()
-              : { ...att };
-
-          if (
-            typeof item.url === "string" &&
-            !/^https?:\/\//i.test(item.url) &&
-            !item.url.startsWith("blob:")
-          ) {
-            item.url = item.url.startsWith("/")
-              ? item.url
-              : `/${item.url}`;
-          }
-
-          return item;
-        }
-      );
 
   return {
     id: msg._id,
@@ -115,10 +81,14 @@ const safeMessage = (msg, currentUserId = null) => {
     messageType: deletedForEveryone
       ? "text"
       : msg.messageType || "text",
-    attachments,
+    attachments: deletedForEveryone
+      ? []
+      : Array.isArray(msg.attachments)
+        ? msg.attachments
+        : [],
     isRead: Boolean(msg.isRead),
     readAt: msg.readAt || null,
-    reactions: Array.isArray(msg.reactions)
+    reactions: Array.isArray(msg.reactions) && msg.reactions.length
       ? msg.reactions
       : Array.isArray(msg.metadata?.reactions)
         ? msg.metadata.reactions
@@ -127,9 +97,7 @@ const safeMessage = (msg, currentUserId = null) => {
     direction: msg.direction || "internal",
     metadata: msg.metadata || {},
     isDeletedForEveryone: deletedForEveryone,
-    isDeletedForMe: currentUserId
-      ? deletedFor.includes(String(currentUserId))
-      : false,
+    isDeletedForMe: deletedForMe,
     deletedForEveryoneAt: msg.deletedForEveryoneAt || null,
     deletedBy: safeUserRef(msg.deletedBy),
     createdAt: msg.createdAt,
@@ -137,194 +105,200 @@ const safeMessage = (msg, currentUserId = null) => {
   };
 };
 
-const determineMessageType = (
-  attachments,
-  defaultType = "text"
-) => {
-  if (!Array.isArray(attachments) || !attachments.length) {
+const determineMessageType = (attachments, defaultType = "text") => {
+  if (!Array.isArray(attachments) || attachments.length === 0) {
     return defaultType;
   }
 
   const mime = String(
-    attachments[0]?.mimeType ||
-      attachments[0]?.fileType ||
-      ""
+    attachments[0]?.mimeType || attachments[0]?.fileType || ""
   ).toLowerCase();
 
-  if (mime.startsWith("image/")) return "image";
-  if (mime.startsWith("video/")) return "video";
-  if (mime.startsWith("audio/")) return "audio";
+  if (mime.startsWith("image/") || mime === "image") return "image";
+  if (mime.startsWith("video/") || mime === "video") return "video";
+  if (mime.startsWith("audio/") || mime === "audio") return "audio";
 
-  return "file";
+  return defaultType === "document" ? "document" : "file";
 };
 
-const getPreviewText = (text, type) => {
+const getIo = (req) => req.app.get("io");
+
+const emitToConversation = (io, conversationId, eventName, payload) => {
+  if (!io || !conversationId) return;
+
+  io.to(String(conversationId)).emit(eventName, payload);
+};
+
+/**
+ * Deliver to the user's connected sockets that have not joined
+ * this conversation room.
+ *
+ * Sockets in the conversation room receive the room event, so they
+ * should not receive the same event a second time.
+ */
+const emitToUserOutsideConversation = (
+  io,
+  userId,
+  conversationId,
+  eventName,
+  payload
+) => {
+  if (!io || !userId || !eventName) return;
+
+  const userRoom = String(userId);
+  const conversationRoom = String(conversationId || "");
+
+  try {
+    const sockets = io.sockets?.sockets;
+
+    if (sockets && typeof sockets.forEach === "function") {
+      sockets.forEach((socket) => {
+        if (
+          socket.rooms?.has(userRoom) &&
+          (!conversationRoom || !socket.rooms.has(conversationRoom))
+        ) {
+          socket.emit(eventName, payload);
+        }
+      });
+
+      return;
+    }
+
+    let operator = io.to(userRoom);
+
+    if (
+      conversationRoom &&
+      operator &&
+      typeof operator.except === "function"
+    ) {
+      operator = operator.except(conversationRoom);
+    }
+
+    operator?.emit(eventName, payload);
+  } catch (error) {
+    console.error(
+      `[Socket.IO] Failed to emit ${eventName}:`,
+      error.message
+    );
+  }
+};
+
+const canAccessConversation = (
+  conversation,
+  userId,
+  role = ""
+) => {
+  if (!conversation || !userId) return false;
+
+  const normalizedRole = String(role || "").toLowerCase();
+
+  // Match the existing administrative access policy.
+  if (normalizedRole === "admin" || normalizedRole === "manager") {
+    return true;
+  }
+
+  const participantIds = Array.isArray(conversation.participants)
+    ? conversation.participants.map((participant) =>
+        String(participant?._id || participant)
+      )
+    : [];
+
+  if (participantIds.includes(String(userId))) {
+    return true;
+  }
+
+  const legacyUserId = conversation.userId
+    ? String(conversation.userId?._id || conversation.userId)
+    : null;
+
+  return legacyUserId === String(userId);
+};
+
+const getPreviewText = (text, messageType) => {
   if (text) return text;
 
-  const previews = {
-    image: "📷 Photo",
-    video: "🎬 Video",
-    audio: "🎤 Audio",
-    file: "📎 Attachment",
-  };
-
-  return previews[type] || "📎 Attachment";
+  switch (messageType) {
+    case "image":
+      return "📷 Photo";
+    case "video":
+      return "🎬 Video";
+    case "audio":
+      return "🎤 Audio";
+    default:
+      return "📎 Attachment";
+  }
 };
 
 const populateMessage = (query) =>
   query
-    .populate("sender", "name email role avatar profileImage")
-    .populate("recipient", "name email role avatar profileImage")
+    .populate("sender", "name email role avatar")
+    .populate("recipient", "name email role avatar")
     .populate("deletedBy", "name email role");
 
 const getDeletedForUser = (msg, userId) =>
   Array.isArray(msg.deletedFor) &&
   msg.deletedFor.some((id) => String(id) === String(userId));
 
-const emitToConversation = (
-  io,
-  conversationId,
-  event,
-  payload
-) => {
-  if (io && conversationId) {
-    io.to(String(conversationId)).emit(event, payload);
-  }
-};
+const getUserRole = (user) =>
+  String(user?.role || "").toLowerCase();
 
-/*
- * Conversation security:
- * - Group conversations are not supported.
- * - Admin must be a participant in the conversation.
- * - A regular user can access only their own conversation with Admin.
- * - A user cannot access another user's conversation.
- */
-
-const canAccessConversation = async (conversation, user) => {
-  if (!conversation || !user || conversation.isGroup === true) {
-    return false;
-  }
-
-  const currentUserId = String(user._id);
-  const participantIds = getParticipantIds(conversation);
-
-  if (!participantIds.includes(currentUserId)) {
-    return false;
-  }
-
-  const otherIds = participantIds.filter(
-    (id) => id !== currentUserId
-  );
-
-  if (otherIds.length !== 1) {
-    return false;
-  }
-
-  const otherUsers = await User.find({
-    _id: { $in: otherIds },
-  })
-    .select("_id role")
-    .lean();
-
-  if (otherUsers.length !== 1) {
-    return false;
-  }
-
-  if (isAdmin(user)) {
-    return getUserRole(otherUsers[0]) !== "admin";
-  }
-
-  return getUserRole(otherUsers[0]) === "admin";
-};
-
-const findAccessibleMessage = async (messageId, user) => {
-  if (!isValidObjectId(messageId)) {
-    return { error: "invalid" };
-  }
-
-  const msg = await Message.findById(messageId);
-
-  if (!msg || getDeletedForUser(msg, user._id)) {
-    return { error: "not_found" };
-  }
-
-  const conversation = await Conversation.findById(
-    msg.conversation
-  ).select("participants userId isGroup");
-
-  if (!(await canAccessConversation(conversation, user))) {
-    return { error: "forbidden" };
-  }
-
-  return { msg, conversation };
-};
-
-const sendError = (res, error) => {
-  const responses = {
-    invalid: [400, "Invalid ID."],
-    not_found: [404, "Message or conversation not found."],
-    forbidden: [
-      403,
-      "You are not allowed to access this conversation.",
-    ],
-  };
-
-  const [status, message] = responses[error] || [
-    500,
-    "An unexpected error occurred.",
-  ];
-
-  return res.status(status).json({
-    success: false,
-    message,
-  });
-};
+const getParticipantIds = (conversation) =>
+  Array.isArray(conversation?.participants)
+    ? [
+        ...new Set(
+          conversation.participants
+            .map((participant) => toId(participant))
+            .filter(Boolean)
+        ),
+      ]
+    : [];
 
 // =====================================================
 // GET CONVERSATION MESSAGES
-// FIX: Supports both query-string and route-parameter IDs.
 // =====================================================
 
 const getMessages = async (req, res) => {
   try {
-    // Frontend request:
-    // GET /api/messages?conversationId=...&limit=100
-    //
-    // Also supports the existing route:
-    // GET /api/messages/:conversationId
+    const { conversationId } = req.params;
+    const { page = 1, limit = 50 } = req.query;
 
-    const conversationId =
-      req.query?.conversationId ||
-      req.params?.conversationId;
-
-    if (
-      typeof conversationId !== "string" ||
-      !mongoose.isValidObjectId(conversationId)
-    ) {
-      return sendError(res, "invalid");
+    if (!isValidObjectId(conversationId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid conversation ID.",
+      });
     }
 
-    const conversation = await Conversation.findById(
-      conversationId
-    ).select("participants userId isGroup");
+    const conversation = await Conversation.findById(conversationId)
+      .select("participants userId")
+      .lean();
 
     if (!conversation) {
-      return sendError(res, "not_found");
+      return res.status(404).json({
+        success: false,
+        message: "Conversation not found.",
+      });
     }
 
-    if (!(await canAccessConversation(conversation, req.user))) {
-      return sendError(res, "forbidden");
+    if (
+      !canAccessConversation(
+        conversation,
+        req.user._id,
+        getUserRole(req.user)
+      )
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "You are not allowed to access this conversation.",
+      });
     }
 
-    const page = Math.max(
-      1,
-      parseInt(req.query.page, 10) || 1
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(
+      100,
+      Math.max(1, parseInt(limit, 10) || 50)
     );
-
-    const limit = Math.min(
-      150,
-      Math.max(1, parseInt(req.query.limit, 10) || 100)
-    );
+    const skip = (pageNum - 1) * limitNum;
 
     const filter = {
       conversation: conversationId,
@@ -333,20 +307,13 @@ const getMessages = async (req, res) => {
 
     const [messages, total] = await Promise.all([
       Message.find(filter)
-        .populate(
-          "sender",
-          "name email role avatar profileImage"
-        )
-        .populate(
-          "recipient",
-          "name email role avatar profileImage"
-        )
+        .populate("sender", "name email role avatar")
+        .populate("recipient", "name email role avatar")
         .populate("deletedBy", "name email role")
         .sort({ createdAt: -1, _id: -1 })
-        .skip((page - 1) * limit)
-        .limit(limit)
+        .skip(skip)
+        .limit(limitNum)
         .lean(),
-
       Message.countDocuments(filter),
     ]);
 
@@ -361,10 +328,10 @@ const getMessages = async (req, res) => {
       messages: formatted,
       data: formatted,
       pagination: {
-        page,
-        limit,
+        page: pageNum,
+        limit: limitNum,
         total,
-        pages: Math.ceil(total / limit),
+        pages: Math.ceil(total / limitNum) || 0,
       },
     });
   } catch (error) {
@@ -385,15 +352,39 @@ const getMessageById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const result = await findAccessibleMessage(id, req.user);
-
-    if (result.error) {
-      return sendError(res, result.error);
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid message ID.",
+      });
     }
 
-    const msg = await populateMessage(
-      Message.findById(result.msg._id)
-    ).lean();
+    const msg = await populateMessage(Message.findById(id)).lean();
+
+    if (!msg || getDeletedForUser(msg, req.user._id)) {
+      return res.status(404).json({
+        success: false,
+        message: "Message not found.",
+      });
+    }
+
+    const conversation = await Conversation.findById(msg.conversation)
+      .select("participants userId")
+      .lean();
+
+    if (
+      !conversation ||
+      !canAccessConversation(
+        conversation,
+        req.user._id,
+        getUserRole(req.user)
+      )
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "You do not have permission to view this message.",
+      });
+    }
 
     const formatted = safeMessage(msg, req.user._id);
 
@@ -429,6 +420,7 @@ const sendMessage = async (req, res) => {
     } = req.body;
 
     const currentUserId = String(req.user._id);
+    const role = getUserRole(req.user);
 
     let rawAttachments = req.body.attachments;
 
@@ -436,14 +428,11 @@ const sendMessage = async (req, res) => {
       try {
         rawAttachments = JSON.parse(rawAttachments);
       } catch {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid attachments format.",
-        });
+        rawAttachments = [];
       }
     }
 
-    const attachments = Array.isArray(rawAttachments)
+    let attachments = Array.isArray(rawAttachments)
       ? [...rawAttachments]
       : [];
 
@@ -452,49 +441,48 @@ const sendMessage = async (req, res) => {
     if (Array.isArray(req.files)) {
       incomingFiles.push(...req.files);
     } else if (req.files && typeof req.files === "object") {
-      Object.values(req.files).forEach((files) => {
-        if (Array.isArray(files)) {
-          incomingFiles.push(...files);
-        } else if (files) {
-          incomingFiles.push(files);
+      Object.values(req.files).forEach((fileList) => {
+        if (Array.isArray(fileList)) {
+          incomingFiles.push(...fileList);
+        } else if (fileList) {
+          incomingFiles.push(fileList);
         }
       });
     }
 
-    if (req.file) {
-      incomingFiles.push(req.file);
-    }
+    if (req.file) incomingFiles.push(req.file);
 
     for (const file of incomingFiles) {
       attachments.push({
         url: `/uploads/chat/${file.filename}`,
         filename: file.filename,
         originalName: file.originalname,
-        fileType:
-          String(file.mimetype || "").split("/")[0] || "file",
+        fileType: String(file.mimetype || "").split("/")[0] || "file",
         mimeType: file.mimetype,
         size: file.size,
       });
     }
 
+    const seenAttachments = new Set();
+
+    attachments = attachments.filter((attachment) => {
+      const key = attachment?.url || attachment?.filename;
+
+      if (!key) return true;
+      if (seenAttachments.has(key)) return false;
+
+      seenAttachments.add(key);
+      return true;
+    });
+
     if (attachments.length > 20) {
       return res.status(400).json({
         success: false,
-        message:
-          "Maximum 20 attachments are allowed per message.",
+        message: "Maximum 20 attachments are allowed per message.",
       });
     }
 
-    const text = String(
-      body ?? message ?? content ?? ""
-    ).trim();
-
-    if (!text && attachments.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Message text or an attachment is required.",
-      });
-    }
+    const text = String(body ?? message ?? content ?? "").trim();
 
     if (text.length > 20000) {
       return res.status(400).json({
@@ -503,134 +491,250 @@ const sendMessage = async (req, res) => {
       });
     }
 
-    let conversation;
-    let recipientUser;
+    if (!text && attachments.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Message text or an attachment is required.",
+      });
+    }
 
-    // Existing conversation: both users must be authorized.
+    let conversation;
+    let recipientUser = null;
+
+    // -------------------------------------------------
+    // Existing conversation
+    // -------------------------------------------------
+
     if (conversationId) {
       if (!isValidObjectId(conversationId)) {
-        return sendError(res, "invalid");
+        return res.status(400).json({
+          success: false,
+          message: "Invalid conversation ID.",
+        });
       }
 
       conversation = await Conversation.findById(conversationId);
 
       if (!conversation) {
-        return sendError(res, "not_found");
-      }
-
-      if (!(await canAccessConversation(conversation, req.user))) {
-        return sendError(res, "forbidden");
-      }
-
-      if (recipientId || to) {
-        return res.status(400).json({
+        return res.status(404).json({
           success: false,
-          message:
-            "Do not override the recipient of an existing conversation.",
+          message: "Conversation not found.",
         });
       }
 
-      const otherId = getParticipantIds(conversation).find(
-        (id) => id !== currentUserId
-      );
-
-      recipientUser = await User.findById(otherId)
-        .select("_id name email role avatar profileImage")
-        .lean();
-
-      if (!recipientUser) {
-        return sendError(res, "not_found");
-      }
-    } else {
-      // Only Admin can initiate a conversation.
-      if (!isAdmin(req.user)) {
+      if (
+        !canAccessConversation(
+          conversation,
+          currentUserId,
+          role
+        )
+      ) {
         return res.status(403).json({
           success: false,
-          message:
-            "Users can only reply to an existing Admin conversation.",
+          message: "You are not allowed to access this conversation.",
         });
       }
+    } else {
+      // -------------------------------------------------
+      // Find or create a direct conversation
+      // -------------------------------------------------
 
       const targetId = String(recipientId || to || "");
 
-      if (
-        !isValidObjectId(targetId) ||
-        targetId === currentUserId
-      ) {
+      if (!isValidObjectId(targetId)) {
         return res.status(400).json({
           success: false,
-          message: "A valid user recipientId is required.",
+          message: "A valid recipientId or conversationId is required.",
+        });
+      }
+
+      if (targetId === currentUserId) {
+        return res.status(400).json({
+          success: false,
+          message: "Cannot send a message to yourself.",
         });
       }
 
       recipientUser = await User.findById(targetId)
-        .select("_id name email role avatar profileImage")
+        .select("_id name email role avatar")
         .lean();
 
       if (!recipientUser) {
-        return sendError(res, "not_found");
-      }
-
-      if (getUserRole(recipientUser) === "admin") {
-        return res.status(403).json({
+        return res.status(404).json({
           success: false,
-          message:
-            "Admin-to-admin conversations are not supported.",
+          message: "Recipient user not found.",
         });
       }
 
-      const ids = [
-        new mongoose.Types.ObjectId(currentUserId),
-        new mongoose.Types.ObjectId(targetId),
-      ];
+      const targetRole = getUserRole(recipientUser);
 
+      if (
+        role !== "admin" &&
+        role !== "manager" &&
+        !["admin", "manager", "support"].includes(targetRole)
+      ) {
+        return res.status(403).json({
+          success: false,
+          message: "Regular users can only message Admin or Support.",
+        });
+      }
+
+      const currentObjectId = new mongoose.Types.ObjectId(currentUserId);
+      const targetObjectId = new mongoose.Types.ObjectId(targetId);
+
+      // Never reuse a group as a direct conversation.
       conversation = await Conversation.findOne({
         isGroup: { $ne: true },
-        participants: { $all: ids, $size: 2 },
+        participants: {
+          $all: [currentObjectId, targetObjectId],
+          $size: 2,
+        },
       });
 
       if (!conversation) {
         conversation = await Conversation.create({
-          participants: ids,
+          participants: [currentObjectId, targetObjectId],
           isGroup: false,
           status: "open",
           channel: "chat",
         });
       }
+    }
 
-      if (!(await canAccessConversation(conversation, req.user))) {
-        return sendError(res, "forbidden");
+    // -------------------------------------------------
+    // Resolve recipients
+    // -------------------------------------------------
+
+    const participantIds = getParticipantIds(conversation);
+    let resolvedRecipientId = null;
+
+    if (participantIds.length > 0) {
+      const isParticipant = participantIds.includes(currentUserId);
+
+      if (!isParticipant && role !== "admin" && role !== "manager") {
+        return res.status(403).json({
+          success: false,
+          message: "You are not a participant in this conversation.",
+        });
+      }
+
+      if (!conversation.isGroup) {
+        resolvedRecipientId =
+          participantIds.find((id) => id !== currentUserId) || null;
+      }
+    } else if (conversation.userId) {
+      const legacyId = toId(conversation.userId);
+
+      if (legacyId && legacyId !== currentUserId) {
+        resolvedRecipientId = legacyId;
       }
     }
 
-    const recipientIdResolved = String(recipientUser._id);
+    // For direct chats, do not let a request override the conversation's
+    // actual recipient.
+    if (!conversation.isGroup && (recipientId || to)) {
+      const requestedRecipientId = String(recipientId || to);
 
-    const type = determineMessageType(
-      attachments,
-      messageType || "text"
-    );
+      if (
+        resolvedRecipientId &&
+        requestedRecipientId !== resolvedRecipientId
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "The recipient does not match this conversation.",
+        });
+      }
+    }
+
+    if (
+      !conversation.isGroup &&
+      (!resolvedRecipientId ||
+        !isValidObjectId(resolvedRecipientId) ||
+        resolvedRecipientId === currentUserId)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Could not resolve the other participant in this conversation.",
+      });
+    }
+
+    if (resolvedRecipientId) {
+      recipientUser =
+        recipientUser ||
+        (await User.findById(resolvedRecipientId)
+          .select("_id name email role avatar")
+          .lean());
+
+      if (!recipientUser) {
+        return res.status(404).json({
+          success: false,
+          message: "Conversation recipient was not found.",
+        });
+      }
+    }
+
+    // Group conversations notify all other participants.
+    const recipientIds = conversation.isGroup
+      ? participantIds.filter((id) => id !== currentUserId)
+      : resolvedRecipientId
+        ? [resolvedRecipientId]
+        : [];
+
+    const allowedMessageTypes = new Set([
+      "text",
+      "image",
+      "file",
+      "document",
+      "video",
+      "audio",
+      "system",
+    ]);
+
+    if (messageType && !allowedMessageTypes.has(String(messageType))) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid message type.",
+      });
+    }
+
+    const calculatedMessageType =
+      attachments.length > 0
+        ? determineMessageType(
+            attachments,
+            messageType && messageType !== "text"
+              ? messageType
+              : "file"
+          )
+        : messageType || "text";
+
+    // -------------------------------------------------
+    // Persist message
+    // -------------------------------------------------
 
     const createdMessage = await Message.create({
       conversation: conversation._id,
       sender: req.user._id,
-      recipient: recipientUser._id,
+      recipient: resolvedRecipientId,
       body: text,
       message: text,
-      messageType: type,
+      messageType: calculatedMessageType,
       attachments,
       isRead: false,
       readAt: null,
     });
 
+    const conversationIdString = String(conversation._id);
     const now = createdMessage.createdAt || new Date();
-    const preview = getPreviewText(text, type);
+    const previewText = getPreviewText(text, calculatedMessageType);
 
+    // Update the preview before notifying connected clients.
     await Conversation.updateOne(
       { _id: conversation._id },
       {
         $set: {
-          lastMessage: preview,
-          lastMessageType: type,
+          lastMessage: previewText,
+          lastMessageType: calculatedMessageType,
           lastMessageAt: now,
           lastSender: req.user._id,
         },
@@ -642,53 +746,154 @@ const sendMessage = async (req, res) => {
       name: req.user.name || "",
       email: req.user.email || "",
       role: req.user.role || "",
-      avatar: req.user.avatar || req.user.profileImage || null,
+      avatar: req.user.avatar || null,
+      status: req.user.status,
     };
 
-    const formatted = safeMessage(
+    const recipientPayload = recipientUser
+      ? {
+          _id: recipientUser._id,
+          name: recipientUser.name || "",
+          email: recipientUser.email || "",
+          role: recipientUser.role || "",
+          avatar: recipientUser.avatar || null,
+        }
+      : null;
+
+    const formattedMessage = safeMessage(
       {
         ...createdMessage.toObject(),
         sender: senderPayload,
-        recipient: recipientUser,
+        recipient: recipientPayload,
       },
       currentUserId
     );
 
+    // -------------------------------------------------
+    // Real-time delivery
+    // -------------------------------------------------
+
     const io = getIo(req);
-    const conversationIdString = String(conversation._id);
 
     if (io) {
+      /*
+       * Canonical message event for this controller:
+       * receive_message
+       *
+       * Do not emit receive_message and new_message for the same
+       * saved message from this endpoint.
+       */
+
       emitToConversation(
         io,
         conversationIdString,
         "receive_message",
-        formatted
+        formattedMessage
       );
 
-      emitToConversation(
-        io,
-        conversationIdString,
-        "new_message",
-        formatted
-      );
+      // Deliver to recipients whose sockets have not joined this room.
+      for (const targetUserId of recipientIds) {
+        emitToUserOutsideConversation(
+          io,
+          targetUserId,
+          conversationIdString,
+          "receive_message",
+          formattedMessage
+        );
 
-      io.to(recipientIdResolved).emit("notification", {
-        type: "message",
-        title: `New message from ${senderPayload.name || "Admin"}`,
-        message: preview,
-        conversationId: conversationIdString,
-        messageId: String(createdMessage._id),
-        senderId: currentUserId,
-        senderName: senderPayload.name || "Admin",
-        createdAt: now,
-      });
+        io.to(String(targetUserId)).emit("notification", {
+          type: "message",
+          title: `New message from ${senderPayload.name || "User"}`,
+          message: previewText,
+          conversationId: conversationIdString,
+          messageId: String(createdMessage._id),
+          senderId: currentUserId,
+          senderName: senderPayload.name || "User",
+          createdAt: now,
+        });
+      }
     }
+
+    // -------------------------------------------------
+    // Persistent notifications and email
+    // -------------------------------------------------
+
+    const senderName = senderPayload.name || "User";
+    const senderIdForNotification = currentUserId;
+    const conversationIdForNotification = String(conversation._id);
+    const messageIdForNotification = String(createdMessage._id);
+    const roleForNotification = role;
+
+    // Snapshot values before starting asynchronous work.
+    const recipientsForNotification = recipientIds.map(String);
+
+    setImmediate(() => {
+      void (async () => {
+        for (const targetUserId of recipientsForNotification) {
+          try {
+            await createNotification({
+              userId: targetUserId,
+              type: "message",
+              title: "New Message",
+              message: `${senderName} sent you a message.`,
+              relatedId: conversation._id,
+              relatedType: "Message",
+              actionUrl:
+                roleForNotification === "admin" ||
+                roleForNotification === "manager"
+                  ? "/user/conversations"
+                  : "/admin/conversations",
+              metadata: {
+                conversationId: conversationIdForNotification,
+                messageId: messageIdForNotification,
+                senderId: senderIdForNotification,
+                senderName,
+              },
+            });
+          } catch (error) {
+            console.error(
+              `[Messages] Notification creation failed for ${targetUserId}:`,
+              error.message
+            );
+          }
+
+          try {
+            let targetUser = null;
+
+            if (
+              recipientUser &&
+              String(recipientUser._id) === targetUserId
+            ) {
+              targetUser = recipientUser;
+            } else {
+              targetUser = await User.findById(targetUserId)
+                .select("name email")
+                .lean();
+            }
+
+            if (targetUser?.email) {
+              await sendMessageNotificationEmail(
+                targetUser.email,
+                targetUser.name || "User",
+                senderName,
+                previewText
+              );
+            }
+          } catch (error) {
+            console.error(
+              `[Messages] Notification email failed for ${targetUserId}:`,
+              error.message
+            );
+          }
+        }
+      })();
+    });
 
     return res.status(201).json({
       success: true,
       message: "Message sent successfully.",
-      data: formatted,
-      messageData: formatted,
+      data: formattedMessage,
+      messageData: formattedMessage,
     });
   } catch (error) {
     console.error("[Messages] sendMessage:", error);
@@ -707,49 +912,80 @@ const sendMessage = async (req, res) => {
 const updateMessage = async (req, res) => {
   try {
     const { id } = req.params;
-    const newText =
-      req.body.body ?? req.body.message ?? req.body.content;
+    const newText = req.body.body ?? req.body.message ?? req.body.content;
 
-    const result = await findAccessibleMessage(id, req.user);
-
-    if (result.error) {
-      return sendError(res, result.error);
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid message ID.",
+      });
     }
 
-    const msg = result.msg;
+    const msg = await Message.findById(id);
+
+    if (!msg) {
+      return res.status(404).json({
+        success: false,
+        message: "Message not found.",
+      });
+    }
 
     if (msg.isDeletedForEveryone) {
       return res.status(400).json({
         success: false,
-        message: "Deleted messages cannot be edited.",
+        message: "Cannot edit a deleted message.",
       });
     }
 
-    if (String(msg.sender) !== String(req.user._id)) {
+    if (getDeletedForUser(msg, req.user._id)) {
+      return res.status(404).json({
+        success: false,
+        message: "Message not found.",
+      });
+    }
+
+    const role = getUserRole(req.user);
+
+    if (
+      String(msg.sender) !== String(req.user._id) &&
+      role !== "admin"
+    ) {
       return res.status(403).json({
         success: false,
         message: "You can only edit your own messages.",
       });
     }
 
-    if (newText === undefined) {
-      return res.status(400).json({
+    const conversation = await Conversation.findById(msg.conversation)
+      .select("participants userId")
+      .lean();
+
+    if (
+      !conversation ||
+      !canAccessConversation(conversation, req.user._id, role)
+    ) {
+      return res.status(403).json({
         success: false,
-        message: "Updated message text is required.",
+        message: "You cannot access this conversation.",
       });
     }
 
-    const text = String(newText).trim();
+    if (newText !== undefined) {
+      const updatedText = String(newText).trim();
 
-    if (!text || text.length > 20000) {
-      return res.status(400).json({
-        success: false,
-        message: "Message text is empty or too long.",
-      });
+      if (
+        !updatedText &&
+        (!Array.isArray(msg.attachments) || msg.attachments.length === 0)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Message text cannot be empty.",
+        });
+      }
+
+      msg.body = updatedText;
+      msg.message = updatedText;
     }
-
-    msg.body = text;
-    msg.message = text;
 
     await msg.save();
 
@@ -785,14 +1021,13 @@ const updateMessage = async (req, res) => {
 };
 
 // =====================================================
-// UNREAD MESSAGE COUNT
+// UNREAD COUNT
 // =====================================================
 
 const getUnreadMessageCount = async (req, res) => {
   try {
     const unreadCount = await Message.countDocuments({
       recipient: req.user._id,
-      sender: { $ne: req.user._id },
       isRead: false,
       deletedFor: { $ne: req.user._id },
     });
@@ -820,19 +1055,34 @@ const markMessagesAsRead = async (req, res) => {
     const { conversationId } = req.params;
 
     if (!isValidObjectId(conversationId)) {
-      return sendError(res, "invalid");
+      return res.status(400).json({
+        success: false,
+        message: "Invalid conversation ID.",
+      });
     }
 
-    const conversation = await Conversation.findById(
-      conversationId
-    ).select("participants userId isGroup");
+    const conversation = await Conversation.findById(conversationId)
+      .select("participants userId")
+      .lean();
 
     if (!conversation) {
-      return sendError(res, "not_found");
+      return res.status(404).json({
+        success: false,
+        message: "Conversation not found.",
+      });
     }
 
-    if (!(await canAccessConversation(conversation, req.user))) {
-      return sendError(res, "forbidden");
+    if (
+      !canAccessConversation(
+        conversation,
+        req.user._id,
+        getUserRole(req.user)
+      )
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "You are not allowed to access this conversation.",
+      });
     }
 
     const now = new Date();
@@ -844,21 +1094,24 @@ const markMessagesAsRead = async (req, res) => {
       deletedFor: { $ne: req.user._id },
     };
 
-    const result = await Message.updateMany(filter, {
-      $set: { isRead: true, readAt: now },
-    });
+    const [sendersToNotify, result] = await Promise.all([
+      Message.distinct("sender", filter),
+      Message.updateMany(filter, {
+        $set: {
+          isRead: true,
+          readAt: now,
+        },
+      }),
+    ]);
 
-    const modifiedCount =
-      result.modifiedCount ?? result.nModified ?? 0;
+    const io = getIo(req);
 
     const payload = {
       conversationId: String(conversationId),
       readerId: String(req.user._id),
       readAt: now,
-      modifiedCount,
+      modifiedCount: result.modifiedCount ?? result.nModified ?? 0,
     };
-
-    const io = getIo(req);
 
     if (io) {
       emitToConversation(
@@ -867,12 +1120,24 @@ const markMessagesAsRead = async (req, res) => {
         "messages_read",
         payload
       );
+
+      for (const senderId of sendersToNotify) {
+        if (String(senderId) !== String(req.user._id)) {
+          emitToUserOutsideConversation(
+            io,
+            senderId,
+            conversationId,
+            "messages_read",
+            payload
+          );
+        }
+      }
     }
 
     return res.status(200).json({
       success: true,
       message: "Messages marked as read.",
-      modifiedCount,
+      modifiedCount: payload.modifiedCount,
     });
   } catch (error) {
     console.error("[Messages] markMessagesAsRead:", error);
@@ -892,18 +1157,54 @@ const markSingleMessageAsRead = async (req, res) => {
   try {
     const messageId = req.params.messageId || req.params.id;
 
-    const result = await findAccessibleMessage(messageId, req.user);
-
-    if (result.error) {
-      return sendError(res, result.error);
+    if (!isValidObjectId(messageId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid message ID.",
+      });
     }
 
-    const msg = result.msg;
+    const msg = await Message.findById(messageId);
 
-    if (String(msg.recipient) !== String(req.user._id)) {
+    if (!msg) {
+      return res.status(404).json({
+        success: false,
+        message: "Message not found.",
+      });
+    }
+
+    if (
+      !msg.recipient ||
+      String(msg.recipient) !== String(req.user._id)
+    ) {
       return res.status(403).json({
         success: false,
         message: "You can only mark messages sent to you as read.",
+      });
+    }
+
+    if (getDeletedForUser(msg, req.user._id)) {
+      return res.status(404).json({
+        success: false,
+        message: "Message not found.",
+      });
+    }
+
+    const conversation = await Conversation.findById(msg.conversation)
+      .select("participants userId")
+      .lean();
+
+    if (
+      !conversation ||
+      !canAccessConversation(
+        conversation,
+        req.user._id,
+        getUserRole(req.user)
+      )
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "You cannot access this conversation.",
       });
     }
 
@@ -919,25 +1220,41 @@ const markSingleMessageAsRead = async (req, res) => {
 
     const formatted = safeMessage(populated, req.user._id);
     const io = getIo(req);
+    const conversationId = String(msg.conversation);
+
+    const payload = {
+      conversationId,
+      messageId: String(msg._id),
+      readerId: String(req.user._id),
+      readAt: msg.readAt || new Date(),
+    };
 
     if (io) {
       emitToConversation(
         io,
-        msg.conversation,
+        conversationId,
         "message_read",
         formatted
       );
+
+      if (msg.sender) {
+        emitToUserOutsideConversation(
+          io,
+          msg.sender,
+          conversationId,
+          "messages_read",
+          payload
+        );
+      }
     }
 
     return res.status(200).json({
       success: true,
+      message: "Message marked as read.",
       data: formatted,
     });
   } catch (error) {
-    console.error(
-      "[Messages] markSingleMessageAsRead:",
-      error
-    );
+    console.error("[Messages] markSingleMessageAsRead:", error);
 
     return res.status(500).json({
       success: false,
@@ -947,17 +1264,47 @@ const markSingleMessageAsRead = async (req, res) => {
 };
 
 // =====================================================
-// DELETE MESSAGE FOR ME
+// DELETE MESSAGE FOR CURRENT USER
 // =====================================================
 
 const deleteMessageForMe = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const result = await findAccessibleMessage(id, req.user);
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid message ID.",
+      });
+    }
 
-    if (result.error) {
-      return sendError(res, result.error);
+    const msg = await Message.findById(id)
+      .select("_id conversation sender recipient deletedFor")
+      .lean();
+
+    if (!msg) {
+      return res.status(404).json({
+        success: false,
+        message: "Message not found.",
+      });
+    }
+
+    const conversation = await Conversation.findById(msg.conversation)
+      .select("participants userId")
+      .lean();
+
+    if (
+      !conversation ||
+      !canAccessConversation(
+        conversation,
+        req.user._id,
+        getUserRole(req.user)
+      )
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "You cannot access this message.",
+      });
     }
 
     await Message.updateOne(
@@ -967,7 +1314,7 @@ const deleteMessageForMe = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: "Message deleted for you.",
+      message: "Message deleted for you successfully.",
       messageId: id,
     });
   } catch (error) {
@@ -975,7 +1322,7 @@ const deleteMessageForMe = async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message: "Server error deleting message.",
+      message: "Server error deleting message for you.",
     });
   }
 };
@@ -988,21 +1335,44 @@ const deleteMessageForEveryone = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const result = await findAccessibleMessage(id, req.user);
-
-    if (result.error) {
-      return sendError(res, result.error);
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid message ID.",
+      });
     }
 
-    const msg = result.msg;
+    const msg = await Message.findById(id);
+
+    if (!msg) {
+      return res.status(404).json({
+        success: false,
+        message: "Message not found.",
+      });
+    }
+
+    const role = getUserRole(req.user);
+    const isSender = String(msg.sender) === String(req.user._id);
+
+    if (!isSender && role !== "admin" && role !== "manager") {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Only the sender or an admin/manager can delete this message for everyone.",
+      });
+    }
+
+    const conversation = await Conversation.findById(msg.conversation)
+      .select("participants userId")
+      .lean();
 
     if (
-      String(msg.sender) !== String(req.user._id) &&
-      !isAdmin(req.user)
+      !conversation ||
+      !canAccessConversation(conversation, req.user._id, role)
     ) {
       return res.status(403).json({
         success: false,
-        message: "You cannot delete this message for everyone.",
+        message: "You cannot access this conversation.",
       });
     }
 
@@ -1014,6 +1384,19 @@ const deleteMessageForEveryone = async (req, res) => {
     msg.attachments = [];
 
     await msg.save();
+
+    await Conversation.updateOne(
+      {
+        _id: msg.conversation,
+        lastMessageAt: msg.createdAt,
+      },
+      {
+        $set: {
+          lastMessage: "This message was deleted",
+          lastMessageType: "text",
+        },
+      }
+    );
 
     const populated = await populateMessage(
       Message.findById(msg._id)
@@ -1029,36 +1412,95 @@ const deleteMessageForEveryone = async (req, res) => {
         "message_deleted",
         formatted
       );
+
+      const participantIds = getParticipantIds(conversation);
+
+      for (const participantId of participantIds) {
+        emitToUserOutsideConversation(
+          io,
+          participantId,
+          msg.conversation,
+          "message_deleted",
+          formatted
+        );
+      }
     }
 
     return res.status(200).json({
       success: true,
-      message: "Message deleted for everyone.",
+      message: "Message deleted for everyone successfully.",
       data: formatted,
     });
   } catch (error) {
-    console.error(
-      "[Messages] deleteMessageForEveryone:",
-      error
-    );
+    console.error("[Messages] deleteMessageForEveryone:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Server error deleting message for everyone.",
+    });
+  }
+};
+
+// =====================================================
+// GENERIC DELETE ROUTE
+// =====================================================
+
+const deleteMessage = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid message ID.",
+      });
+    }
+
+    const deleteType = String(
+      req.query.type ||
+      req.body?.type ||
+      req.body?.deleteType ||
+      ""
+    ).toLowerCase();
+
+    if (deleteType === "me" || deleteType === "for_me") {
+      return deleteMessageForMe(req, res);
+    }
+
+    if (
+      deleteType === "everyone" ||
+      deleteType === "for_everyone"
+    ) {
+      return deleteMessageForEveryone(req, res);
+    }
+
+    const msg = await Message.findById(id)
+      .select("sender")
+      .lean();
+
+    if (!msg) {
+      return res.status(404).json({
+        success: false,
+        message: "Message not found.",
+      });
+    }
+
+    const role = getUserRole(req.user);
+    const isSender = String(msg.sender) === String(req.user._id);
+
+    if (isSender || role === "admin" || role === "manager") {
+      return deleteMessageForEveryone(req, res);
+    }
+
+    return deleteMessageForMe(req, res);
+  } catch (error) {
+    console.error("[Messages] deleteMessage:", error);
 
     return res.status(500).json({
       success: false,
       message: "Server error deleting message.",
     });
   }
-};
-
-const deleteMessage = async (req, res) => {
-  const type = String(
-    req.query.type || req.body?.type || ""
-  ).toLowerCase();
-
-  if (type === "me") {
-    return deleteMessageForMe(req, res);
-  }
-
-  return deleteMessageForEveryone(req, res);
 };
 
 // =====================================================
@@ -1070,86 +1512,86 @@ const reactToMessage = async (req, res) => {
     const { id } = req.params;
     const emoji = String(req.body?.emoji || "").trim();
 
-    if (!isValidObjectId(id) || !emoji) {
+    if (!isValidObjectId(id)) {
       return res.status(400).json({
         success: false,
-        message: "A valid message ID and emoji are required.",
+        message: "Invalid message ID.",
       });
     }
 
-    if (emoji.length > 32) {
+    // Limit reaction payloads to a single emoji (including joined emoji).
+    if (!emoji || emoji.length > 32) {
       return res.status(400).json({
         success: false,
-        message: "Invalid reaction.",
+        message: "A valid emoji reaction is required.",
       });
     }
 
-    const result = await findAccessibleMessage(id, req.user);
+    const msg = await Message.findById(id);
 
-    if (result.error) {
-      return sendError(res, result.error);
-    }
-
-    const msg = result.msg;
-
-    if (msg.isDeletedForEveryone) {
-      return res.status(400).json({
+    if (!msg || msg.isDeletedForEveryone || getDeletedForUser(msg, req.user._id)) {
+      return res.status(404).json({
         success: false,
-        message: "Deleted messages cannot be reacted to.",
+        message: "Message not found.",
       });
     }
 
-    const metadata = msg.metadata?.toObject
-      ? msg.metadata.toObject()
-      : { ...(msg.metadata || {}) };
+    const role = getUserRole(req.user);
+    const conversation = await Conversation.findById(msg.conversation)
+      .select("participants userId")
+      .lean();
 
-    const reactions = Array.isArray(metadata.reactions)
-      ? [...metadata.reactions]
-      : [];
+    if (
+      !conversation ||
+      !canAccessConversation(conversation, req.user._id, role)
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "You cannot access this conversation.",
+      });
+    }
 
     const userId = String(req.user._id);
+    // Persist reactions in the schema's canonical Message.reactions array.
+    // The old implementation wrote only metadata.reactions, which could be
+    // hidden by the schema's always-present (but empty) reactions array.
+    const reactions = Array.isArray(msg.reactions)
+      ? msg.reactions.map((item) => ({
+          userId: String(item.userId),
+          emoji: item.emoji,
+          createdAt: item.createdAt,
+        }))
+      : [];
 
-    const index = reactions.findIndex(
+    const existingIndex = reactions.findIndex(
       (reaction) => String(reaction.userId) === userId
     );
 
-    if (index >= 0 && reactions[index].emoji === emoji) {
-      reactions.splice(index, 1);
+    // Same emoji toggles off; a different emoji replaces the user's reaction.
+    if (existingIndex >= 0 && reactions[existingIndex].emoji === emoji) {
+      reactions.splice(existingIndex, 1);
     } else {
-      const reaction = {
-        userId,
-        emoji,
-        createdAt: new Date(),
-      };
-
-      if (index >= 0) {
-        reactions[index] = reaction;
-      } else {
-        reactions.push(reaction);
-      }
+      const reaction = { userId, emoji, createdAt: new Date() };
+      if (existingIndex >= 0) reactions[existingIndex] = reaction;
+      else reactions.push(reaction);
     }
 
-    metadata.reactions = reactions;
-    msg.metadata = metadata;
-    msg.markModified("metadata");
-
+    msg.reactions = reactions;
     await msg.save();
 
     const populated = await populateMessage(
       Message.findById(msg._id)
     ).lean();
-
     const formatted = safeMessage(populated, req.user._id);
-
     const payload = {
       conversationId: String(msg.conversation),
       messageId: String(msg._id),
       reactions: formatted.reactions,
       message: formatted,
+      userId,
     };
 
     const io = getIo(req);
-
     if (io) {
       emitToConversation(
         io,
@@ -1157,19 +1599,30 @@ const reactToMessage = async (req, res) => {
         "message_reaction_updated",
         payload
       );
+
+      const participantIds = getParticipantIds(conversation);
+      for (const participantId of participantIds) {
+        emitToUserOutsideConversation(
+          io,
+          participantId,
+          msg.conversation,
+          "message_reaction_updated",
+          payload
+        );
+      }
     }
 
     return res.status(200).json({
       success: true,
+      message: "Reaction updated successfully.",
       data: formatted,
       reactions: formatted.reactions,
     });
   } catch (error) {
     console.error("[Messages] reactToMessage:", error);
-
     return res.status(500).json({
       success: false,
-      message: "Server error updating reaction.",
+      message: "Server error updating message reaction.",
     });
   }
 };

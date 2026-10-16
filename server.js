@@ -1,3 +1,4 @@
+
 "use strict";
 
 require("dotenv").config();
@@ -15,7 +16,14 @@ const jwt = require("jsonwebtoken");
 
 const connectDB = require("./config/db");
 const Conversation = require("./models/Conversation");
+const Message = require("./models/Message");
 const User = require("./models/User");
+
+const {
+  setSocketServer,
+} = require("./sockets/socketManager");
+
+const SOCKET_EVENTS = require("./sockets/events");
 
 const {
   startAttendanceEmailScheduler,
@@ -112,7 +120,7 @@ const socketCorsOptions = {
 };
 
 // =====================================================
-// SOCKET.IO
+// SOCKET.IO INITIALIZATION
 // =====================================================
 
 const io = new Server(server, {
@@ -130,6 +138,9 @@ const io = new Server(server, {
 });
 
 app.set("io", io);
+
+// Register the same Socket.IO instance for backend controllers.
+setSocketServer(io);
 
 // userId -> Set of socket IDs
 const activeUsers = new Map();
@@ -157,7 +168,7 @@ function removeActiveSocket(userId, socketId) {
   if (sockets.size === 0) {
     activeUsers.delete(id);
 
-    io.emit("update_user_status", {
+    io.emit(SOCKET_EVENTS.USER_STATUS_UPDATE, {
       userId: id,
       status: "offline",
     });
@@ -186,9 +197,15 @@ function getTokenFromSocket(socket) {
   const authorization =
     socket.handshake.headers?.authorization || "";
 
-  const bearerToken = authorization.replace(/^Bearer\s+/i, "");
+  const bearerToken = authorization.replace(/^Bearer\s+/i, "").trim();
 
-  return socket.handshake.auth?.token || bearerToken || null;
+  const authToken = socket.handshake.auth?.token;
+
+  if (typeof authToken === "string" && authToken.trim()) {
+    return authToken.replace(/^Bearer\s+/i, "").trim();
+  }
+
+  return bearerToken || null;
 }
 
 function getDecodedUserId(decoded) {
@@ -204,16 +221,37 @@ function getDecodedUserId(decoded) {
 function getDecodedRole(decoded) {
   return String(
     decoded?.role ||
-      decoded?.userRole ||
-      decoded?.accountType ||
-      ""
+    decoded?.userRole ||
+    decoded?.accountType ||
+    ""
   ).toLowerCase();
 }
 
 function replyToSocket(callback, result) {
   if (typeof callback === "function") {
-    callback(result);
+    try {
+      callback(result);
+    } catch (error) {
+      console.error(
+        "[Socket.IO] Acknowledgement callback failed:",
+        error.message
+      );
+    }
   }
+}
+
+function emitSocketError(socket, callback, message, code) {
+  const result = {
+    success: false,
+    code: code || "SOCKET_OPERATION_FAILED",
+    message,
+  };
+
+  replyToSocket(callback, result);
+
+  socket.emit("message_error", result);
+
+  return result;
 }
 
 // =====================================================
@@ -224,7 +262,10 @@ io.use(async (socket, next) => {
   try {
     if (!process.env.JWT_SECRET) {
       console.error("[Socket.IO] JWT_SECRET is not configured.");
-      return next(new Error("Socket authentication unavailable."));
+
+      return next(
+        new Error("Socket authentication unavailable.")
+      );
     }
 
     const token = getTokenFromSocket(socket);
@@ -240,12 +281,15 @@ io.use(async (socket, next) => {
       return next(new Error("Invalid authentication token."));
     }
 
+    // Always retrieve the current account and role from MongoDB.
     const user = await User.findById(userId)
       .select("_id role")
       .lean();
 
     if (!user) {
-      return next(new Error("Authenticated user no longer exists."));
+      return next(
+        new Error("Authenticated user no longer exists.")
+      );
     }
 
     socket.data.userId = String(user._id);
@@ -259,7 +303,9 @@ io.use(async (socket, next) => {
       `[Socket.IO] Authentication rejected: ${error.message}`
     );
 
-    return next(new Error("Invalid or expired authentication token."));
+    return next(
+      new Error("Invalid or expired authentication token.")
+    );
   }
 });
 
@@ -267,112 +313,78 @@ io.use(async (socket, next) => {
 // CONVERSATION ACCESS
 // =====================================================
 
-async function canJoinConversation(userId, role, conversationId) {
-  try {
-    if (
-      typeof conversationId !== "string" ||
-      !mongoose.Types.ObjectId.isValid(conversationId)
-    ) {
-      return false;
-    }
-
-    const normalizedUserId = String(userId);
-    const normalizedRole = String(role || "").toLowerCase();
-
-    const conversation = await Conversation.findById(conversationId)
-      .select("participants isGroup")
-      .populate("participants", "_id role")
-      .lean();
-
-    if (!conversation) return false;
-
-    // Preserve the existing administrative access policy.
-    if (normalizedRole === "admin") {
-      return true;
-    }
-
-    // Regular users and managers cannot join group conversations.
-    if (conversation.isGroup === true) {
-      return false;
-    }
-
-    const participants = Array.isArray(conversation.participants)
-      ? conversation.participants
-      : [];
-
-    const participantIds = [
-      ...new Set(
-        participants
-          .map((participant) =>
-            String(participant?._id || participant || "")
-          )
-          .filter(Boolean)
-      ),
-    ];
-
-    // A non-admin must be one of exactly two participants.
-    if (
-      participantIds.length !== 2 ||
-      !participantIds.includes(normalizedUserId)
-    ) {
-      return false;
-    }
-
-    const otherParticipantId = participantIds.find(
-      (participantId) => participantId !== normalizedUserId
-    );
-
-    if (!otherParticipantId) return false;
-
-    const otherParticipant = participants.find(
-      (participant) =>
-        String(participant?._id || participant || "") ===
-        otherParticipantId
-    );
-
-    // Non-admin users may only access their own Admin conversation.
-    return (
-      String(otherParticipant?.role || "").toLowerCase() === "admin"
-    );
-  } catch (error) {
-    console.error(
-      "[Socket.IO] Conversation access check failed:",
-      error.message
-    );
-
-    // If access cannot be verified, deny access.
+async function canJoinConversation(
+  userId,
+  role,
+  conversationId
+) {
+  if (
+    typeof conversationId !== "string" ||
+    !mongoose.Types.ObjectId.isValid(conversationId)
+  ) {
     return false;
   }
+
+  const conversation = await Conversation.findById(conversationId)
+    .select("participants userId isGroup")
+    .lean();
+
+  if (!conversation) return false;
+
+  const participantIds = (
+    conversation.participants || []
+  ).map((participant) =>
+    String(participant?._id || participant)
+  );
+
+  if (participantIds.includes(String(userId))) {
+    return true;
+  }
+
+  // Support older conversations that use userId.
+  if (String(conversation.userId || "") === String(userId)) {
+    return true;
+  }
+
+  // Preserve the backend's administrative access policy.
+  if (role === "admin" || role === "manager") {
+    return true;
+  }
+
+  return false;
 }
 
 // =====================================================
 // SOCKET CONNECTION
 // =====================================================
 
-io.on("connection", (socket) => {
+io.on(SOCKET_EVENTS.CONNECTION, (socket) => {
   const connectedAt = Date.now();
   const connectedUserId = socket.data.userId;
   const connectedUserRole = socket.data.role || "";
 
   console.log(
     `[Socket.IO] Connected: ${socket.id}; ` +
-      `user=${connectedUserId}; ` +
-      `transport=${socket.conn.transport.name}; ` +
-      `origin=${socket.handshake.headers.origin || "none"}`
+    `user=${connectedUserId}; ` +
+    `transport=${socket.conn.transport.name}; ` +
+    `origin=${socket.handshake.headers.origin || "none"}`
   );
 
-  // Private room for the authenticated user.
+  // Every authenticated socket automatically joins its private user room.
   socket.join(connectedUserId);
 
   addActiveSocket(connectedUserId, socket.id);
 
-  io.emit("update_user_status", {
+  io.emit(SOCKET_EVENTS.USER_STATUS_UPDATE, {
     userId: connectedUserId,
     status: "online",
   });
 
-  // A user can join only their own private room.
-  socket.on("user_join", (requestedUserId, callback) => {
+  // ---------------------------------------------------
+  // USER JOIN
+  // ---------------------------------------------------
+
+  socket.on(SOCKET_EVENTS.USER_JOIN, (requestedUserId, callback) => {
     if (
       !requestedUserId ||
       String(requestedUserId) !== connectedUserId
@@ -393,8 +405,11 @@ io.on("connection", (socket) => {
     });
   });
 
-  // Join a conversation only after checking permissions.
-  socket.on("join_room", async (roomId, callback) => {
+  // ---------------------------------------------------
+  // JOIN CONVERSATION ROOM
+  // ---------------------------------------------------
+
+  const joinConversationRoom = async (roomId, callback) => {
     if (typeof roomId !== "string" || !roomId.trim()) {
       replyToSocket(callback, {
         success: false,
@@ -421,13 +436,13 @@ io.on("connection", (socket) => {
 
         console.warn(
           `[Socket.IO] Rejected room join: ` +
-            `user=${connectedUserId}, room=${normalizedRoomId}`
+          `user=${connectedUserId}, room=${normalizedRoomId}`
         );
 
         return;
       }
 
-      socket.join(normalizedRoomId);
+      await socket.join(normalizedRoomId);
 
       replyToSocket(callback, {
         success: true,
@@ -436,7 +451,7 @@ io.on("connection", (socket) => {
     } catch (error) {
       console.error(
         "[Socket.IO] Room authorization error:",
-        error.message
+        error
       );
 
       replyToSocket(callback, {
@@ -444,9 +459,286 @@ io.on("connection", (socket) => {
         message: "Unable to authorize conversation access.",
       });
     }
-  });
+  };
 
-  socket.on("leave_room", (roomId, callback) => {
+  socket.on("join_room", joinConversationRoom);
+
+  // Support the namespaced event as well as the legacy event.
+  socket.on(
+    SOCKET_EVENTS.CONVERSATION_JOIN,
+    joinConversationRoom
+  );
+
+  // ---------------------------------------------------
+  // REAL-TIME MESSAGE SENDING
+  // ---------------------------------------------------
+  // Text messages can be sent over Socket.IO.
+  // File uploads should continue to use the authenticated REST endpoint.
+  //
+  // IMPORTANT:
+  // The frontend must emit only ONE send event for each user action.
+  // Do not emit both send_message and message:send for the same message.
+
+  const handleSendMessage = async (data = {}, callback) => {
+    const fail = (message, code = "MESSAGE_SEND_FAILED") =>
+      emitSocketError(socket, callback, message, code);
+
+    try {
+      if (
+        !data ||
+        typeof data !== "object" ||
+        Array.isArray(data)
+      ) {
+        return fail(
+          "Invalid message payload.",
+          "INVALID_PAYLOAD"
+        );
+      }
+
+      const conversationId = String(
+        data.conversationId || data.roomId || ""
+      ).trim();
+
+      const rawBody =
+        data.body ?? data.message ?? data.content ?? "";
+
+      if (typeof rawBody !== "string") {
+        return fail(
+          "Message text must be a string.",
+          "INVALID_MESSAGE_BODY"
+        );
+      }
+
+      const body = rawBody.trim();
+
+      const clientMessageId =
+        typeof data.clientMessageId === "string" &&
+        data.clientMessageId.trim()
+          ? data.clientMessageId.trim().slice(0, 128)
+          : undefined;
+
+      if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+        return fail(
+          "A valid conversation ID is required.",
+          "INVALID_CONVERSATION"
+        );
+      }
+
+      if (!body) {
+        return fail(
+          "Message text cannot be empty.",
+          "EMPTY_MESSAGE"
+        );
+      }
+
+      if (body.length > 20000) {
+        return fail(
+          "Message text is too long.",
+          "MESSAGE_TOO_LONG"
+        );
+      }
+
+      const allowed = await canJoinConversation(
+        connectedUserId,
+        connectedUserRole,
+        conversationId
+      );
+
+      if (!allowed) {
+        return fail(
+          "You do not have access to this conversation.",
+          "FORBIDDEN"
+        );
+      }
+
+      const conversation = await Conversation.findById(
+        conversationId
+      )
+        .select("participants isGroup")
+        .populate(
+          "participants",
+          "_id name email role avatar"
+        )
+        .lean();
+
+      if (!conversation) {
+        return fail(
+          "Conversation not found.",
+          "CONVERSATION_NOT_FOUND"
+        );
+      }
+
+      const participants = Array.isArray(
+        conversation.participants
+      )
+        ? conversation.participants
+        : [];
+
+      const participantIds = participants
+        .map((participant) =>
+          String(participant?._id || participant || "")
+        )
+        .filter(Boolean);
+
+      const hasAdministrativeAccess =
+        connectedUserRole === "admin" ||
+        connectedUserRole === "manager";
+
+      // Non-administrative users must belong to the conversation.
+      if (
+        !hasAdministrativeAccess &&
+        !participantIds.includes(connectedUserId)
+      ) {
+        return fail(
+          "You are not a participant in this conversation.",
+          "FORBIDDEN"
+        );
+      }
+
+      const otherParticipants = participants.filter(
+        (participant) =>
+          String(participant?._id || participant || "") !==
+          connectedUserId
+      );
+
+      const recipientId = conversation.isGroup
+        ? null
+        : (
+            String(
+              otherParticipants[0]?._id ||
+              otherParticipants[0] ||
+              ""
+            ) || null
+          );
+
+      // Persist the message before notifying clients.
+      const message = await Message.create({
+        conversation: conversationId,
+        sender: connectedUserId,
+        recipient: recipientId,
+        body,
+        message: body,
+        messageType: "text",
+        attachments: [],
+        isRead: false,
+        readAt: null,
+      });
+
+      // Keep conversation preview up to date. A preview update failure
+      // must not invalidate a message that has already been saved.
+      try {
+        await Conversation.updateOne(
+          { _id: conversationId },
+          {
+            $set: {
+              lastMessage: body,
+              lastMessageType: "text",
+              lastMessageAt: message.createdAt || new Date(),
+              lastSender: connectedUserId,
+            },
+          }
+        ).exec();
+      } catch (error) {
+        console.error(
+          "[Socket.IO] Conversation preview update failed:",
+          error.message
+        );
+      }
+
+      const populatedMessage = await Message.findById(
+        message._id
+      )
+        .populate(
+          "sender",
+          "_id name email phone role status avatar"
+        )
+        .populate(
+          "recipient",
+          "_id name email phone role status avatar"
+        )
+        .lean();
+
+      if (!populatedMessage) {
+        return fail(
+          "Message was saved but could not be loaded.",
+          "MESSAGE_RELOAD_FAILED"
+        );
+      }
+
+      const sender = populatedMessage.sender || {
+        _id: connectedUserId,
+        id: connectedUserId,
+      };
+
+      const serializedMessage = {
+        ...populatedMessage,
+        id: String(populatedMessage._id),
+        _id: String(populatedMessage._id),
+        conversationId: String(conversationId),
+        sender,
+        recipient: populatedMessage.recipient || null,
+        body,
+        message: body,
+        messageType: "text",
+        attachments: [],
+        clientMessageId,
+      };
+
+      // Sender acknowledgement event. Other sender tabs can receive it too.
+      io.to(connectedUserId).emit(
+        "message_sent",
+        serializedMessage
+      );
+
+      // Deliver to all other conversation participants, including their
+      // other connected tabs. Group conversations use the same participant
+      // delivery mechanism.
+      for (const participantId of participantIds) {
+        if (
+          participantId &&
+          participantId !== connectedUserId
+        ) {
+          io.to(participantId).emit(
+            "receive_message",
+            serializedMessage
+          );
+        }
+      }
+
+      const result = {
+        success: true,
+        message: serializedMessage,
+        data: serializedMessage,
+        clientMessageId,
+      };
+
+      replyToSocket(callback, result);
+    } catch (error) {
+      console.error(
+        "[Socket.IO] send_message failed:",
+        error
+      );
+
+      return fail(
+        "Unable to send message. Please try again."
+      );
+    }
+  };
+
+  socket.on("send_message", handleSendMessage);
+
+  // Namespaced alias for clients using events.js.
+  // The frontend must use either event name, not both for one send.
+  socket.on(
+    SOCKET_EVENTS.MESSAGE_SEND,
+    handleSendMessage
+  );
+
+  // ---------------------------------------------------
+  // LEAVE CONVERSATION ROOM
+  // ---------------------------------------------------
+
+  const leaveConversationRoom = async (roomId, callback) => {
     if (typeof roomId !== "string" || !roomId.trim()) {
       replyToSocket(callback, {
         success: false,
@@ -467,30 +759,70 @@ io.on("connection", (socket) => {
       return;
     }
 
-    socket.leave(normalizedRoomId);
+    // Only leave a room that is a valid conversation the user can access.
+    try {
+      const allowed = await canJoinConversation(
+        connectedUserId,
+        connectedUserRole,
+        normalizedRoomId
+      );
 
-    replyToSocket(callback, {
-      success: true,
-      roomId: normalizedRoomId,
-    });
-  });
+      if (!allowed) {
+        replyToSocket(callback, {
+          success: false,
+          message: "You do not have access to this conversation.",
+        });
+
+        return;
+      }
+
+      await socket.leave(normalizedRoomId);
+
+      replyToSocket(callback, {
+        success: true,
+        roomId: normalizedRoomId,
+      });
+    } catch (error) {
+      console.error(
+        "[Socket.IO] Leave room authorization error:",
+        error
+      );
+
+      replyToSocket(callback, {
+        success: false,
+        message: "Unable to leave conversation room.",
+      });
+    }
+  };
+
+  socket.on("leave_room", leaveConversationRoom);
+
+  socket.on(
+    SOCKET_EVENTS.CONVERSATION_LEAVE,
+    leaveConversationRoom
+  );
+
+  // ---------------------------------------------------
+  // TRANSPORT / DISCONNECT / ERROR
+  // ---------------------------------------------------
 
   socket.conn.on("upgrade", (transport) => {
     console.log(
-      `[Socket.IO] Transport upgraded for ${socket.id}: ${transport.name}`
+      `[Socket.IO] Transport upgraded for ${socket.id}: ` +
+      `${transport.name}`
     );
   });
 
-  socket.on("disconnect", (reason) => {
+  socket.on(SOCKET_EVENTS.DISCONNECT, (reason) => {
     removeActiveSocket(connectedUserId, socket.id);
 
     console.log(
       `[Socket.IO] User ${connectedUserId} disconnected: ${reason}; ` +
-        `connected for ${Date.now() - connectedAt}ms`
+      `connected for ${Date.now() - connectedAt}ms`
     );
   });
 
-  socket.on("error", (error) => {
+  socket.on(SOCKET_EVENTS.ERROR, (error) => {
     console.error(
       `[Socket.IO] Error on ${socket.id}:`,
       error.message
@@ -609,11 +941,16 @@ app.get("/health", (req, res) => {
 
 app.post("/api/send-attendance-reminders", async (req, res) => {
   try {
-    console.log("[Attendance Email] Manual sending started.");
+    console.log(
+      "[Attendance Email] Manual sending started."
+    );
 
     const result = await sendDailyAttendanceEmails();
 
-    console.log("[Attendance Email] Completed:", result);
+    console.log(
+      "[Attendance Email] Completed:",
+      result
+    );
 
     return res.status(200).json({
       success: true,
@@ -740,8 +1077,13 @@ const startAttendanceScheduler = () => {
       processAttendanceNotifications,
     } = require("./controllers/attendanceController");
 
-    if (typeof processAttendanceNotifications !== "function") {
-      console.warn("[Attendance] Processing function unavailable.");
+    if (
+      typeof processAttendanceNotifications !== "function"
+    ) {
+      console.warn(
+        "[Attendance] Processing function unavailable."
+      );
+
       return;
     }
 
@@ -766,15 +1108,24 @@ const startAttendanceScheduler = () => {
       if (shuttingDown) return;
 
       try {
-        const result = await processAttendanceNotifications();
+        const result =
+          await processAttendanceNotifications();
 
-        console.log("[Attendance] Scheduler completed:", result);
+        console.log(
+          "[Attendance] Scheduler completed:",
+          result
+        );
       } catch (error) {
-        console.error("[Attendance] Scheduler error:", error);
+        console.error(
+          "[Attendance] Scheduler error:",
+          error
+        );
       }
     }, 60 * 1000);
 
-    console.log("[Attendance] Scheduler started (60 seconds).");
+    console.log(
+      "[Attendance] Scheduler started (60 seconds)."
+    );
   } catch (error) {
     console.error(
       "[Attendance] Failed to start scheduler:",
@@ -789,8 +1140,13 @@ const startAttendanceScheduler = () => {
 
 const startAttendanceEmailSchedulerSafe = () => {
   try {
-    if (typeof startAttendanceEmailScheduler !== "function") {
-      console.warn("[Attendance Email] Scheduler unavailable.");
+    if (
+      typeof startAttendanceEmailScheduler !== "function"
+    ) {
+      console.warn(
+        "[Attendance Email] Scheduler unavailable."
+      );
+
       return;
     }
 
@@ -839,13 +1195,17 @@ const startServer = async () => {
 
     if (shuttingDown) return;
 
-    console.log("[Database] MongoDB connection established.");
+    console.log(
+      "[Database] MongoDB connection established."
+    );
 
     server.on("error", (error) => {
       console.error("[Server] HTTP server error:", error);
 
       if (error.code === "EADDRINUSE") {
-        console.error(`[Server] Port ${PORT} is already in use.`);
+        console.error(
+          `[Server] Port ${PORT} is already in use.`
+        );
       }
     });
 
@@ -856,8 +1216,13 @@ const startServer = async () => {
       console.log(
         `[Environment] ${process.env.NODE_ENV || "development"}`
       );
-      console.log("[CORS] Allowed origins:", [...allowedOrigins]);
-      console.log("[Socket.IO] Real-time server initialized.");
+      console.log(
+        "[CORS] Allowed origins:",
+        [...allowedOrigins]
+      );
+      console.log(
+        "[Socket.IO] Real-time server initialized."
+      );
 
       startAttendanceScheduler();
       startAttendanceEmailSchedulerSafe();
@@ -881,7 +1246,9 @@ const shutdown = async (signal) => {
 
   shuttingDown = true;
 
-  console.log(`[Server] ${signal} received. Shutting down...`);
+  console.log(
+    `[Server] ${signal} received. Shutting down...`
+  );
 
   if (attendanceScheduler) {
     clearInterval(attendanceScheduler);
@@ -891,7 +1258,10 @@ const shutdown = async (signal) => {
   stopAttendanceEmailSchedulerSafe();
 
   const forceShutdownTimer = setTimeout(() => {
-    console.error("[Server] Forced shutdown after timeout.");
+    console.error(
+      "[Server] Forced shutdown after timeout."
+    );
+
     process.exit(1);
   }, 10000);
 
@@ -907,7 +1277,9 @@ const shutdown = async (signal) => {
               error.message
             );
           } else {
-            console.log("[Server] HTTP server closed.");
+            console.log(
+              "[Server] HTTP server closed."
+            );
           }
 
           resolve();
@@ -930,7 +1302,11 @@ const shutdown = async (signal) => {
     console.log("[Server] Shutdown completed.");
     process.exit(0);
   } catch (error) {
-    console.error("[Server] Shutdown error:", error.message);
+    console.error(
+      "[Server] Shutdown error:",
+      error.message
+    );
+
     process.exit(1);
   }
 };
@@ -939,11 +1315,18 @@ process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
 process.on("unhandledRejection", (reason) => {
-  console.error("[Process] Unhandled promise rejection:", reason);
+  console.error(
+    "[Process] Unhandled promise rejection:",
+    reason
+  );
 });
 
 process.on("uncaughtException", (error) => {
-  console.error("[Process] Uncaught exception:", error);
+  console.error(
+    "[Process] Uncaught exception:",
+    error
+  );
+
   void shutdown("uncaughtException");
 });
 

@@ -104,6 +104,7 @@ const UserSchema = new mongoose.Schema(
       lowercase: true,
       trim: true,
       match: [/^\S+@\S+\.\S+$/, "Please provide a valid email"],
+      index: true,
     },
 
     phone: {
@@ -116,14 +117,16 @@ const UserSchema = new mongoose.Schema(
       type: String,
       required: [true, "Password is required"],
       minlength: [6, "Password must be at least 6 characters"],
-      // Password is excluded from normal queries. Login code must use .select("+password").
+      // Login code must use .select("+password") to retrieve the hash.
       select: false,
     },
 
     // ROLE
+    // "support" is included because the messaging controller permits
+    // direct conversations with support users.
     role: {
       type: String,
-      enum: ["admin", "manager", "user"],
+      enum: ["admin", "manager", "user", "support"],
       default: "user",
       index: true,
     },
@@ -194,8 +197,8 @@ const UserSchema = new mongoose.Schema(
       },
     },
 
-    // Keep these as Mixed objects to preserve compatibility with existing
-    // controllers that store a single schedule object rather than an array.
+    // Keep Mixed fields for compatibility with existing controllers that
+    // store schedule objects in different shapes.
     attendanceSchedule: {
       type: mongoose.Schema.Types.Mixed,
       default: defaultSchedule,
@@ -272,26 +275,21 @@ const UserSchema = new mongoose.Schema(
   }
 );
 
-// Keep the schema reference available for future schedule validation/use.
-// Existing attendanceSchedule/workSchedule fields remain Mixed for compatibility.
+// Keep the schedule sub-schema available for future validation/use.
+// Existing schedule fields remain Mixed for backward compatibility.
 void AttendanceScheduleSchema;
 
 // ============================================================
 // HASH PASSWORD BEFORE SAVE
 // ============================================================
 
-UserSchema.pre("save", async function (next) {
-  try {
-    if (!this.isModified("password")) {
-      return next();
-    }
-
-    const salt = await bcrypt.genSalt(10);
-    this.password = await bcrypt.hash(this.password, salt);
-    return next();
-  } catch (error) {
-    return next(error);
+UserSchema.pre("save", async function () {
+  if (!this.isModified("password")) {
+    return;
   }
+
+  const salt = await bcrypt.genSalt(10);
+  this.password = await bcrypt.hash(this.password, salt);
 });
 
 // ============================================================
