@@ -1,4 +1,3 @@
-
 "use strict";
 
 const mongoose = require("mongoose");
@@ -11,7 +10,9 @@ const User = require("../models/User");
 // =====================================================
 
 const isValidObjectId = (id) =>
-  Boolean(id) && mongoose.Types.ObjectId.isValid(String(id));
+  Boolean(id) &&
+  typeof id !== "object" &&
+  mongoose.Types.ObjectId.isValid(String(id));
 
 const toId = (value) => {
   if (!value) return null;
@@ -82,8 +83,8 @@ const safeMessage = (msg, currentUserId = null) => {
 
   const attachments = deletedForEveryone
     ? []
-    : (Array.isArray(msg.attachments) ? msg.attachments : [])
-        .map((att) => {
+    : (Array.isArray(msg.attachments) ? msg.attachments : []).map(
+        (att) => {
           const item =
             typeof att.toObject === "function"
               ? att.toObject()
@@ -100,7 +101,8 @@ const safeMessage = (msg, currentUserId = null) => {
           }
 
           return item;
-        });
+        }
+      );
 
   return {
     id: msg._id,
@@ -135,13 +137,18 @@ const safeMessage = (msg, currentUserId = null) => {
   };
 };
 
-const determineMessageType = (attachments, defaultType = "text") => {
+const determineMessageType = (
+  attachments,
+  defaultType = "text"
+) => {
   if (!Array.isArray(attachments) || !attachments.length) {
     return defaultType;
   }
 
   const mime = String(
-    attachments[0]?.mimeType || attachments[0]?.fileType || ""
+    attachments[0]?.mimeType ||
+      attachments[0]?.fileType ||
+      ""
   ).toLowerCase();
 
   if (mime.startsWith("image/")) return "image";
@@ -174,7 +181,12 @@ const getDeletedForUser = (msg, userId) =>
   Array.isArray(msg.deletedFor) &&
   msg.deletedFor.some((id) => String(id) === String(userId));
 
-const emitToConversation = (io, conversationId, event, payload) => {
+const emitToConversation = (
+  io,
+  conversationId,
+  event,
+  payload
+) => {
   if (io && conversationId) {
     io.to(String(conversationId)).emit(event, payload);
   }
@@ -187,6 +199,7 @@ const emitToConversation = (io, conversationId, event, payload) => {
  * - A regular user can access only their own conversation with Admin.
  * - A user cannot access another user's conversation.
  */
+
 const canAccessConversation = async (conversation, user) => {
   if (!conversation || !user || conversation.isGroup === true) {
     return false;
@@ -250,7 +263,10 @@ const sendError = (res, error) => {
   const responses = {
     invalid: [400, "Invalid ID."],
     not_found: [404, "Message or conversation not found."],
-    forbidden: [403, "You are not allowed to access this conversation."],
+    forbidden: [
+      403,
+      "You are not allowed to access this conversation.",
+    ],
   };
 
   const [status, message] = responses[error] || [
@@ -266,13 +282,25 @@ const sendError = (res, error) => {
 
 // =====================================================
 // GET CONVERSATION MESSAGES
+// FIX: Supports both query-string and route-parameter IDs.
 // =====================================================
 
 const getMessages = async (req, res) => {
   try {
-    const { conversationId } = req.params;
+    // Frontend request:
+    // GET /api/messages?conversationId=...&limit=100
+    //
+    // Also supports the existing route:
+    // GET /api/messages/:conversationId
 
-    if (!isValidObjectId(conversationId)) {
+    const conversationId =
+      req.query?.conversationId ||
+      req.params?.conversationId;
+
+    if (
+      typeof conversationId !== "string" ||
+      !mongoose.isValidObjectId(conversationId)
+    ) {
       return sendError(res, "invalid");
     }
 
@@ -288,7 +316,11 @@ const getMessages = async (req, res) => {
       return sendError(res, "forbidden");
     }
 
-    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const page = Math.max(
+      1,
+      parseInt(req.query.page, 10) || 1
+    );
+
     const limit = Math.min(
       150,
       Math.max(1, parseInt(req.query.limit, 10) || 100)
@@ -301,13 +333,20 @@ const getMessages = async (req, res) => {
 
     const [messages, total] = await Promise.all([
       Message.find(filter)
-        .populate("sender", "name email role avatar profileImage")
-        .populate("recipient", "name email role avatar profileImage")
+        .populate(
+          "sender",
+          "name email role avatar profileImage"
+        )
+        .populate(
+          "recipient",
+          "name email role avatar profileImage"
+        )
         .populate("deletedBy", "name email role")
         .sort({ createdAt: -1, _id: -1 })
         .skip((page - 1) * limit)
         .limit(limit)
         .lean(),
+
       Message.countDocuments(filter),
     ]);
 
@@ -404,7 +443,7 @@ const sendMessage = async (req, res) => {
       }
     }
 
-    let attachments = Array.isArray(rawAttachments)
+    const attachments = Array.isArray(rawAttachments)
       ? [...rawAttachments]
       : [];
 
@@ -414,19 +453,25 @@ const sendMessage = async (req, res) => {
       incomingFiles.push(...req.files);
     } else if (req.files && typeof req.files === "object") {
       Object.values(req.files).forEach((files) => {
-        if (Array.isArray(files)) incomingFiles.push(...files);
-        else if (files) incomingFiles.push(files);
+        if (Array.isArray(files)) {
+          incomingFiles.push(...files);
+        } else if (files) {
+          incomingFiles.push(files);
+        }
       });
     }
 
-    if (req.file) incomingFiles.push(req.file);
+    if (req.file) {
+      incomingFiles.push(req.file);
+    }
 
     for (const file of incomingFiles) {
       attachments.push({
         url: `/uploads/chat/${file.filename}`,
         filename: file.filename,
         originalName: file.originalname,
-        fileType: String(file.mimetype || "").split("/")[0] || "file",
+        fileType:
+          String(file.mimetype || "").split("/")[0] || "file",
         mimeType: file.mimetype,
         size: file.size,
       });
@@ -435,11 +480,14 @@ const sendMessage = async (req, res) => {
     if (attachments.length > 20) {
       return res.status(400).json({
         success: false,
-        message: "Maximum 20 attachments are allowed per message.",
+        message:
+          "Maximum 20 attachments are allowed per message.",
       });
     }
 
-    const text = String(body ?? message ?? content ?? "").trim();
+    const text = String(
+      body ?? message ?? content ?? ""
+    ).trim();
 
     if (!text && attachments.length === 0) {
       return res.status(400).json({
@@ -477,7 +525,8 @@ const sendMessage = async (req, res) => {
       if (recipientId || to) {
         return res.status(400).json({
           success: false,
-          message: "Do not override the recipient of an existing conversation.",
+          message:
+            "Do not override the recipient of an existing conversation.",
         });
       }
 
@@ -497,13 +546,17 @@ const sendMessage = async (req, res) => {
       if (!isAdmin(req.user)) {
         return res.status(403).json({
           success: false,
-          message: "Users can only reply to an existing Admin conversation.",
+          message:
+            "Users can only reply to an existing Admin conversation.",
         });
       }
 
       const targetId = String(recipientId || to || "");
 
-      if (!isValidObjectId(targetId) || targetId === currentUserId) {
+      if (
+        !isValidObjectId(targetId) ||
+        targetId === currentUserId
+      ) {
         return res.status(400).json({
           success: false,
           message: "A valid user recipientId is required.",
@@ -521,7 +574,8 @@ const sendMessage = async (req, res) => {
       if (getUserRole(recipientUser) === "admin") {
         return res.status(403).json({
           success: false,
-          message: "Admin-to-admin conversations are not supported.",
+          message:
+            "Admin-to-admin conversations are not supported.",
         });
       }
 
@@ -549,7 +603,6 @@ const sendMessage = async (req, res) => {
       }
     }
 
-    // Always derive the recipient from the authorized conversation.
     const recipientIdResolved = String(recipientUser._id);
 
     const type = determineMessageType(
@@ -654,7 +707,8 @@ const sendMessage = async (req, res) => {
 const updateMessage = async (req, res) => {
   try {
     const { id } = req.params;
-    const newText = req.body.body ?? req.body.message ?? req.body.content;
+    const newText =
+      req.body.body ?? req.body.message ?? req.body.content;
 
     const result = await findAccessibleMessage(id, req.user);
 
@@ -696,6 +750,7 @@ const updateMessage = async (req, res) => {
 
     msg.body = text;
     msg.message = text;
+
     await msg.save();
 
     const populated = await populateMessage(
@@ -879,7 +934,10 @@ const markSingleMessageAsRead = async (req, res) => {
       data: formatted,
     });
   } catch (error) {
-    console.error("[Messages] markSingleMessageAsRead:", error);
+    console.error(
+      "[Messages] markSingleMessageAsRead:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
@@ -979,7 +1037,10 @@ const deleteMessageForEveryone = async (req, res) => {
       data: formatted,
     });
   } catch (error) {
-    console.error("[Messages] deleteMessageForEveryone:", error);
+    console.error(
+      "[Messages] deleteMessageForEveryone:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
@@ -1038,10 +1099,9 @@ const reactToMessage = async (req, res) => {
       });
     }
 
-    const metadata =
-      msg.metadata && typeof msg.metadata === "object"
-        ? { ...msg.metadata.toObject?.() || msg.metadata }
-        : {};
+    const metadata = msg.metadata?.toObject
+      ? msg.metadata.toObject()
+      : { ...(msg.metadata || {}) };
 
     const reactions = Array.isArray(metadata.reactions)
       ? [...metadata.reactions]
@@ -1062,8 +1122,11 @@ const reactToMessage = async (req, res) => {
         createdAt: new Date(),
       };
 
-      if (index >= 0) reactions[index] = reaction;
-      else reactions.push(reaction);
+      if (index >= 0) {
+        reactions[index] = reaction;
+      } else {
+        reactions.push(reaction);
+      }
     }
 
     metadata.reactions = reactions;

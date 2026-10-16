@@ -75,7 +75,7 @@ router.post("/:id/delete-for-everyone", deleteMessageForEveryone);
 router.patch("/:id/delete-for-everyone", deleteMessageForEveryone);
 router.delete("/:id/everyone", deleteMessageForEveryone);
 
-// Fetch conversation messages.
+// Fetch conversation messages using query parameter or route parameter.
 router.get("/", getMessages);
 router.get("/:conversationId", getMessages);
 
