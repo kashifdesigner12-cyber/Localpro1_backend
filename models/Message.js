@@ -35,6 +35,13 @@ const MessageSchema = new mongoose.Schema(
       index: true,
     },
 
+    replyTo: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Message",
+      default: null,
+      index: true,
+    },
+
     body: {
       type: String,
       trim: true,

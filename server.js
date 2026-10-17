@@ -172,6 +172,8 @@ function removeActiveSocket(userId, socketId) {
       userId: id,
       status: "offline",
     });
+    io.emit("user_offline", { userId: id });
+    io.emit("user:offline", { userId: id });
 
     return true;
   }
@@ -378,6 +380,23 @@ io.on(SOCKET_EVENTS.CONNECTION, (socket) => {
   io.emit(SOCKET_EVENTS.USER_STATUS_UPDATE, {
     userId: connectedUserId,
     status: "online",
+  });
+  io.emit("user_online", { userId: connectedUserId });
+  io.emit("user:online", { userId: connectedUserId });
+
+  // Provide initial list of online users to the newly connected socket
+  socket.emit("online_users", Array.from(activeUsers.keys()));
+
+  // ---------------------------------------------------
+  // ONLINE USERS QUERY
+  // ---------------------------------------------------
+  socket.on("get_online_users", (callback) => {
+    const users = Array.from(activeUsers.keys());
+    if (typeof callback === "function") {
+      callback({ success: true, users });
+    } else {
+      socket.emit("online_users", users);
+    }
   });
 
   // ---------------------------------------------------
@@ -611,6 +630,17 @@ io.on(SOCKET_EVENTS.CONNECTION, (socket) => {
             ) || null
           );
 
+      const replyToId =
+        data.replyToId ||
+        data.replyTo ||
+        data.replyToMessageId ||
+        null;
+
+      const replyTo =
+        replyToId && mongoose.Types.ObjectId.isValid(String(replyToId))
+          ? String(replyToId)
+          : null;
+
       // Persist the message before notifying clients.
       const message = await Message.create({
         conversation: conversationId,
@@ -620,6 +650,7 @@ io.on(SOCKET_EVENTS.CONNECTION, (socket) => {
         message: body,
         messageType: "text",
         attachments: [],
+        replyTo,
         isRead: false,
         readAt: null,
       });
@@ -656,6 +687,11 @@ io.on(SOCKET_EVENTS.CONNECTION, (socket) => {
           "recipient",
           "_id name email phone role status avatar"
         )
+        .populate({
+          path: "replyTo",
+          select: "_id body message sender attachments createdAt",
+          populate: { path: "sender", select: "_id name email avatar role" },
+        })
         .lean();
 
       if (!populatedMessage) {
@@ -681,6 +717,7 @@ io.on(SOCKET_EVENTS.CONNECTION, (socket) => {
         message: body,
         messageType: "text",
         attachments: [],
+        replyTo: populatedMessage.replyTo || null,
         clientMessageId,
       };
 
@@ -689,6 +726,11 @@ io.on(SOCKET_EVENTS.CONNECTION, (socket) => {
         "message_sent",
         serializedMessage
       );
+
+      // Deliver to conversation room
+      io.to(conversationId).emit("receive_message", serializedMessage);
+      io.to(conversationId).emit("new_message", serializedMessage);
+      io.to(conversationId).emit(SOCKET_EVENTS.MESSAGE_RECEIVE, serializedMessage);
 
       // Deliver to all other conversation participants, including their
       // other connected tabs. Group conversations use the same participant
@@ -700,6 +742,10 @@ io.on(SOCKET_EVENTS.CONNECTION, (socket) => {
         ) {
           io.to(participantId).emit(
             "receive_message",
+            serializedMessage
+          );
+          io.to(participantId).emit(
+            "new_message",
             serializedMessage
           );
         }
@@ -733,6 +779,99 @@ io.on(SOCKET_EVENTS.CONNECTION, (socket) => {
     SOCKET_EVENTS.MESSAGE_SEND,
     handleSendMessage
   );
+
+  // ---------------------------------------------------
+  // TYPING INDICATORS
+  // ---------------------------------------------------
+  const handleTypingStart = (data = {}) => {
+    const conversationId = String(
+      data.conversationId || data.roomId || ""
+    ).trim();
+    if (!conversationId) return;
+
+    const payload = {
+      conversationId,
+      userId: connectedUserId,
+      userName: data.userName || data.senderName || "",
+    };
+
+    socket.to(conversationId).emit("typing:start", payload);
+    socket.to(conversationId).emit("user_typing", payload);
+    socket.to(conversationId).emit("typing", payload);
+  };
+
+  const handleTypingStop = (data = {}) => {
+    const conversationId = String(
+      data.conversationId || data.roomId || ""
+    ).trim();
+    if (!conversationId) return;
+
+    const payload = {
+      conversationId,
+      userId: connectedUserId,
+    };
+
+    socket.to(conversationId).emit("typing:stop", payload);
+    socket.to(conversationId).emit("user_stopped_typing", payload);
+    socket.to(conversationId).emit("stop_typing", payload);
+  };
+
+  socket.on("typing:start", handleTypingStart);
+  socket.on("user_typing", handleTypingStart);
+  socket.on("typing", handleTypingStart);
+
+  socket.on("typing:stop", handleTypingStop);
+  socket.on("user_stopped_typing", handleTypingStop);
+  socket.on("stop_typing", handleTypingStop);
+
+  // ---------------------------------------------------
+  // READ RECEIPTS
+  // ---------------------------------------------------
+  socket.on("mark_messages_read", async (data = {}, callback) => {
+    try {
+      const conversationId = String(
+        data.conversationId || data.roomId || ""
+      ).trim();
+      if (!conversationId || !mongoose.Types.ObjectId.isValid(conversationId)) {
+        replyToSocket(callback, {
+          success: false,
+          message: "Invalid conversation ID",
+        });
+        return;
+      }
+
+      const now = new Date();
+      await Message.updateMany(
+        {
+          conversation: conversationId,
+          sender: { $ne: connectedUserId },
+          $or: [
+            { isRead: false },
+            { readAt: null },
+            { seenBy: { $ne: connectedUserId } },
+          ],
+        },
+        {
+          $set: { isRead: true, readAt: now },
+          $addToSet: { seenBy: connectedUserId, readBy: connectedUserId },
+        }
+      );
+
+      const readPayload = {
+        conversationId,
+        readerId: connectedUserId,
+        readAt: now.toISOString(),
+      };
+
+      io.to(conversationId).emit("messages_read", readPayload);
+      io.to(conversationId).emit("message:read", readPayload);
+
+      replyToSocket(callback, { success: true, ...readPayload });
+    } catch (error) {
+      console.error("[Socket.IO] mark_messages_read error:", error.message);
+      replyToSocket(callback, { success: false, message: error.message });
+    }
+  });
 
   // ---------------------------------------------------
   // LEAVE CONVERSATION ROOM

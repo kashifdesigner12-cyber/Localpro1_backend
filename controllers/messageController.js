@@ -100,6 +100,19 @@ const safeMessage = (msg, currentUserId = null) => {
     isDeletedForMe: deletedForMe,
     deletedForEveryoneAt: msg.deletedForEveryoneAt || null,
     deletedBy: safeUserRef(msg.deletedBy),
+    replyTo: msg.replyTo
+      ? typeof msg.replyTo === "object" && msg.replyTo._id
+        ? {
+            id: String(msg.replyTo._id),
+            _id: String(msg.replyTo._id),
+            body: msg.replyTo.body || msg.replyTo.message || "",
+            message: msg.replyTo.body || msg.replyTo.message || "",
+            sender: safeUserRef(msg.replyTo.sender),
+            createdAt: msg.replyTo.createdAt,
+          }
+        : msg.replyTo
+      : null,
+    clientMessageId: msg.clientMessageId || msg.metadata?.clientMessageId || null,
     createdAt: msg.createdAt,
     updatedAt: msg.updatedAt,
   };
@@ -233,7 +246,12 @@ const populateMessage = (query) =>
   query
     .populate("sender", "name email role avatar")
     .populate("recipient", "name email role avatar")
-    .populate("deletedBy", "name email role");
+    .populate("deletedBy", "name email role")
+    .populate({
+      path: "replyTo",
+      select: "_id body message sender createdAt",
+      populate: { path: "sender", select: "name email role avatar" },
+    });
 
 const getDeletedForUser = (msg, userId) =>
   Array.isArray(msg.deletedFor) &&
@@ -259,8 +277,13 @@ const getParticipantIds = (conversation) =>
 
 const getMessages = async (req, res) => {
   try {
-    const { conversationId } = req.params;
-    const { page = 1, limit = 50 } = req.query;
+    const rawConversationId =
+      req.params.conversationId ||
+      req.params.id ||
+      req.query.conversationId ||
+      req.query.conversation;
+
+    const conversationId = String(rawConversationId || "").trim();
 
     if (!isValidObjectId(conversationId)) {
       return res.status(400).json({
@@ -310,6 +333,11 @@ const getMessages = async (req, res) => {
         .populate("sender", "name email role avatar")
         .populate("recipient", "name email role avatar")
         .populate("deletedBy", "name email role")
+        .populate({
+          path: "replyTo",
+          select: "_id body message sender createdAt",
+          populate: { path: "sender", select: "name email role avatar" },
+        })
         .sort({ createdAt: -1, _id: -1 })
         .skip(skip)
         .limit(limitNum)
@@ -417,6 +445,9 @@ const sendMessage = async (req, res) => {
       message,
       content,
       messageType,
+      replyToId,
+      replyTo,
+      clientMessageId,
     } = req.body;
 
     const currentUserId = String(req.user._id);
@@ -712,16 +743,25 @@ const sendMessage = async (req, res) => {
     // Persist message
     // -------------------------------------------------
 
+    const resolvedReplyToId =
+      replyToId || replyTo
+        ? isValidObjectId(replyToId || replyTo)
+          ? new mongoose.Types.ObjectId(String(replyToId || replyTo))
+          : null
+        : null;
+
     const createdMessage = await Message.create({
       conversation: conversation._id,
       sender: req.user._id,
       recipient: resolvedRecipientId,
+      replyTo: resolvedReplyToId,
       body: text,
       message: text,
       messageType: calculatedMessageType,
       attachments,
       isRead: false,
       readAt: null,
+      metadata: clientMessageId ? { clientMessageId } : {},
     });
 
     const conversationIdString = String(conversation._id);
@@ -741,48 +781,37 @@ const sendMessage = async (req, res) => {
       }
     );
 
-    const senderPayload = {
-      _id: req.user._id,
-      name: req.user.name || "",
-      email: req.user.email || "",
-      role: req.user.role || "",
-      avatar: req.user.avatar || null,
-      status: req.user.status,
+    const populatedCreated = await populateMessage(
+      Message.findById(createdMessage._id)
+    ).lean();
+
+    const formattedMessage = {
+      ...safeMessage(populatedCreated, currentUserId),
+      clientMessageId: clientMessageId || null,
     };
-
-    const recipientPayload = recipientUser
-      ? {
-          _id: recipientUser._id,
-          name: recipientUser.name || "",
-          email: recipientUser.email || "",
-          role: recipientUser.role || "",
-          avatar: recipientUser.avatar || null,
-        }
-      : null;
-
-    const formattedMessage = safeMessage(
-      {
-        ...createdMessage.toObject(),
-        sender: senderPayload,
-        recipient: recipientPayload,
-      },
-      currentUserId
-    );
 
     // -------------------------------------------------
     // Real-time delivery
     // -------------------------------------------------
 
+    const senderPayload = formattedMessage?.sender || {
+      _id: req.user._id,
+      name: req.user.name || "User",
+      email: req.user.email || "",
+      role: req.user.role || "",
+      avatar: req.user.avatar || null,
+    };
+
     const io = getIo(req);
 
     if (io) {
       /*
-       * Canonical message event for this controller:
-       * receive_message
-       *
-       * Do not emit receive_message and new_message for the same
-       * saved message from this endpoint.
+       * Canonical message events:
+       * - message_sent: sender's acknowledgement / multi-tab synchronization
+       * - receive_message: conversation room and recipient delivery
        */
+
+      io.to(currentUserId).emit("message_sent", formattedMessage);
 
       emitToConversation(
         io,

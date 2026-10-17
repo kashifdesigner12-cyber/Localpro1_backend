@@ -88,6 +88,19 @@ const safeMessage = (message, currentUserId = null) => {
     isDeletedForMe: deletedForMe,
     deletedForEveryoneAt: message.deletedForEveryoneAt || null,
     deletedBy: safeUserRef(message.deletedBy),
+    replyTo: message.replyTo
+      ? typeof message.replyTo === "object" && message.replyTo._id
+        ? {
+            id: String(message.replyTo._id),
+            _id: String(message.replyTo._id),
+            body: message.replyTo.body || message.replyTo.message || "",
+            message: message.replyTo.body || message.replyTo.message || "",
+            sender: safeUserRef(message.replyTo.sender),
+            createdAt: message.replyTo.createdAt,
+          }
+        : message.replyTo
+      : null,
+    clientMessageId: message.clientMessageId || message.metadata?.clientMessageId || null,
     channel: message.channel || "chat",
     direction: message.direction || "internal",
     metadata: message.metadata || {},
@@ -155,6 +168,11 @@ const populateMessage = (id) =>
     .populate("sender", "name email phone role status avatar profileImage image")
     .populate("recipient", "name email phone role status avatar profileImage image")
     .populate("deletedBy", "name email role")
+    .populate({
+      path: "replyTo",
+      select: "_id body message sender createdAt",
+      populate: { path: "sender", select: "name email role avatar" },
+    })
     .lean();
 
 const getAvailableContacts = async (req, search = "") => {
@@ -186,6 +204,7 @@ const getAvailableContacts = async (req, search = "") => {
   const users = await User.find(filter)
     .select("_id name email phone role status avatar profileImage image")
     .sort({ name: 1 })
+    .limit(100)
     .lean();
   return users.map(safeUserRef);
 };
@@ -415,7 +434,12 @@ const createConversation = async (req, res) => {
 
 const getConversationMessages = async (req, res) => {
   try {
-    const { id } = req.params;
+    const rawId =
+      req.params.id ||
+      req.params.conversationId ||
+      req.query.conversationId ||
+      req.query.id;
+    const id = String(rawId || "").trim();
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 100));
     if (!isValidObjectId(id)) return res.status(400).json({ success: false, message: "Invalid conversation ID." });
@@ -434,6 +458,11 @@ const getConversationMessages = async (req, res) => {
         .populate("sender", "name email phone role status avatar profileImage image")
         .populate("recipient", "name email phone role status avatar profileImage image")
         .populate("deletedBy", "name email role")
+        .populate({
+          path: "replyTo",
+          select: "_id body message sender createdAt",
+          populate: { path: "sender", select: "name email role avatar" },
+        })
         .sort({ createdAt: 1, _id: 1 })
         .skip(skip)
         .limit(limit)
@@ -469,8 +498,22 @@ const inferMessageType = (attachments, requestedType) => {
 
 const sendConversationMessage = async (req, res) => {
   try {
-    const { id } = req.params;
-    const { body, message, content, messageType, attachments } = req.body;
+    const rawId =
+      req.params.id ||
+      req.params.conversationId ||
+      req.body.conversationId ||
+      req.body.id;
+    const id = String(rawId || "").trim();
+    const {
+      body,
+      message,
+      content,
+      messageType,
+      attachments,
+      replyToId,
+      replyTo,
+      clientMessageId,
+    } = req.body;
     if (!isValidObjectId(id)) return res.status(400).json({ success: false, message: "Invalid conversation ID." });
 
     const conversation = await Conversation.findById(id);
@@ -517,17 +560,26 @@ const sendConversationMessage = async (req, res) => {
       if (!recipientId) return res.status(400).json({ success: false, message: "Conversation recipient could not be determined." });
     }
 
+    const resolvedReplyToId =
+      replyToId || replyTo
+        ? isValidObjectId(replyToId || replyTo)
+          ? new mongoose.Types.ObjectId(String(replyToId || replyTo))
+          : null
+        : null;
+
     const type = inferMessageType(parsedAttachments, messageType);
     const createdMessage = await Message.create({
       conversation: conversation._id,
       sender: req.user._id,
       recipient: recipientId,
+      replyTo: resolvedReplyToId,
       body: cleanText,
       message: cleanText,
       messageType: type,
       attachments: parsedAttachments,
       isRead: false,
       readAt: null,
+      metadata: clientMessageId ? { clientMessageId } : {},
     });
 
     conversation.lastMessage = cleanText || (type === "image" ? "📷 Photo" : type === "video" ? "🎬 Video" : type === "audio" ? "🎤 Audio" : "📎 Attachment");
@@ -537,10 +589,13 @@ const sendConversationMessage = async (req, res) => {
     await conversation.save();
 
     const populated = await populateMessage(createdMessage._id);
-    const formatted = safeMessage(populated, req.user._id);
+    const formatted = {
+      ...safeMessage(populated, req.user._id),
+      clientMessageId: clientMessageId || null,
+    };
     const io = req.app.get("io");
     if (io) {
-      io.to(String(conversation._id)).emit("new_message", formatted);
+      io.to(String(req.user._id)).emit("message_sent", formatted);
       io.to(String(conversation._id)).emit("receive_message", formatted);
       if (conversation.isGroup) {
         (conversation.participants || []).map(toId).filter((participantId) => participantId && participantId !== String(req.user._id))

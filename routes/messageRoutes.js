@@ -73,6 +73,7 @@ router.patch("/:id/read", markSingleMessageAsRead);
 
 // Message reactions.
 router.post("/:id/reactions", reactToMessage);
+router.post("/:id/react", reactToMessage);
 
 // Delete a message only for the current user.
 router.post("/:id/delete-for-me", deleteMessageForMe);
