@@ -316,11 +316,17 @@ const getMessages = async (req, res) => {
       });
     }
 
-    const pageNum = Math.max(1, parseInt(page, 10) || 1);
-    const limitNum = Math.min(
-      100,
-      Math.max(1, parseInt(limit, 10) || 50)
-    );
+    // Read pagination from the request query. These values must be defined
+    // before they are used below; otherwise this endpoint throws a ReferenceError.
+    const page = req.query.page;
+    const limit = req.query.limit;
+
+    const parsedPage = Number.parseInt(page, 10);
+    const parsedLimit = Number.parseInt(limit, 10);
+    const pageNum = Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+    const limitNum = Number.isFinite(parsedLimit) && parsedLimit > 0
+      ? Math.min(100, parsedLimit)
+      : 50;
     const skip = (pageNum - 1) * limitNum;
 
     const filter = {
