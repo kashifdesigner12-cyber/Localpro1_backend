@@ -431,10 +431,11 @@ io.on("connection", (socket) => {
   // =====================================================
   // REAL-TIME MESSAGE SENDING
   // =====================================================
-  // Text messages are persisted through Socket.IO. The frontend should
-  // use this event for text sends and must not also POST the same message
-  // to /api/messages, otherwise duplicates can be created.
-  // File uploads remain on the existing authenticated REST upload route.
+  // Compatibility text-send transport. This event persists a text message
+  // and emits message_sent / receive_message. A single frontend send action
+  // must use EITHER this event OR POST /api/messages, never both, or the
+  // same message may be stored twice. File uploads use the authenticated
+  // REST upload route. The REST message controller also emits real-time events.
   socket.on("send_message", async (data = {}, callback) => {
     const fail = (message, code = "MESSAGE_SEND_FAILED") => {
       const result = { success: false, code, message };

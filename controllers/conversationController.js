@@ -178,10 +178,14 @@ const populateMessage = (id) =>
 const getAvailableContacts = async (req, search = "") => {
   if (!req.user) return [];
   const role = getRole(req.user);
-  const roles = role === "admin" ? ["manager", "user", "support"] : ["admin"];
+  // Admin contact lists should include every active non-admin role, not just
+  // manager/user/support. Non-admin users can still contact Admin only.
+  const roleFilter = role === "admin"
+    ? { $nin: ["admin", "Admin", "ADMIN"] }
+    : { $in: ["admin", "Admin", "ADMIN"] };
   const filter = {
     _id: { $ne: req.user._id },
-    role: { $in: roles },
+    role: roleFilter,
     isDeleted: { $ne: true },
     isActive: { $ne: false },
     $or: [
@@ -204,7 +208,6 @@ const getAvailableContacts = async (req, search = "") => {
   const users = await User.find(filter)
     .select("_id name email phone role status avatar profileImage image")
     .sort({ name: 1 })
-    .limit(100)
     .lean();
   return users.map(safeUserRef);
 };
@@ -219,9 +222,18 @@ const getConversations = async (req, res) => {
     const skip = (page - 1) * limit;
     const isAdmin = getRole(req.user) === "admin";
 
+    // Fetch every conversation the user belongs to, including group chats.
+    // Legacy CRM conversations may use userId/user instead of participants,
+    // so include those fields and enforce access again below.
     const filter = isAdmin
       ? {}
-      : { isGroup: { $ne: true }, participants: req.user._id };
+      : {
+          $or: [
+            { participants: req.user._id },
+            { userId: req.user._id },
+            { user: req.user._id },
+          ],
+        };
 
     const [conversations, contacts] = await Promise.all([
       Conversation.find(filter)
@@ -434,11 +446,7 @@ const createConversation = async (req, res) => {
 
 const getConversationMessages = async (req, res) => {
   try {
-    const rawId =
-      req.params.id ||
-      req.params.conversationId ||
-      req.query.conversationId ||
-      req.query.id;
+    const rawId = req.params.id || req.params.conversationId || req.query.conversationId || req.query.id;
     const id = String(rawId || "").trim();
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 100));
@@ -458,11 +466,6 @@ const getConversationMessages = async (req, res) => {
         .populate("sender", "name email phone role status avatar profileImage image")
         .populate("recipient", "name email phone role status avatar profileImage image")
         .populate("deletedBy", "name email role")
-        .populate({
-          path: "replyTo",
-          select: "_id body message sender createdAt",
-          populate: { path: "sender", select: "name email role avatar" },
-        })
         .sort({ createdAt: 1, _id: 1 })
         .skip(skip)
         .limit(limit)
@@ -498,21 +501,11 @@ const inferMessageType = (attachments, requestedType) => {
 
 const sendConversationMessage = async (req, res) => {
   try {
-    const rawId =
-      req.params.id ||
-      req.params.conversationId ||
-      req.body.conversationId ||
-      req.body.id;
+    const rawId = req.params.id || req.params.conversationId || req.body.conversationId || req.body.id;
     const id = String(rawId || "").trim();
     const {
-      body,
-      message,
-      content,
-      messageType,
-      attachments,
-      replyToId,
-      replyTo,
-      clientMessageId,
+      body, message, content, messageType, attachments,
+      replyToId, replyTo, clientMessageId,
     } = req.body;
     if (!isValidObjectId(id)) return res.status(400).json({ success: false, message: "Invalid conversation ID." });
 
@@ -560,12 +553,23 @@ const sendConversationMessage = async (req, res) => {
       if (!recipientId) return res.status(400).json({ success: false, message: "Conversation recipient could not be determined." });
     }
 
-    const resolvedReplyToId =
-      replyToId || replyTo
-        ? isValidObjectId(replyToId || replyTo)
-          ? new mongoose.Types.ObjectId(String(replyToId || replyTo))
-          : null
-        : null;
+    let resolvedReplyToId = null;
+    const requestedReplyTo = replyToId || replyTo;
+    if (requestedReplyTo) {
+      if (!isValidObjectId(requestedReplyTo)) {
+        return res.status(400).json({ success: false, message: "Invalid reply-to message ID." });
+      }
+      const replyMessage = await Message.findOne({
+        _id: requestedReplyTo,
+        conversation: conversation._id,
+        deletedFor: { $ne: req.user._id },
+        isDeletedForEveryone: { $ne: true },
+      }).select("_id").lean();
+      if (!replyMessage) {
+        return res.status(400).json({ success: false, message: "Reply-to message was not found in this conversation." });
+      }
+      resolvedReplyToId = replyMessage._id;
+    }
 
     const type = inferMessageType(parsedAttachments, messageType);
     const createdMessage = await Message.create({
@@ -579,7 +583,7 @@ const sendConversationMessage = async (req, res) => {
       attachments: parsedAttachments,
       isRead: false,
       readAt: null,
-      metadata: clientMessageId ? { clientMessageId } : {},
+      metadata: clientMessageId ? { clientMessageId: String(clientMessageId).slice(0, 200) } : {},
     });
 
     conversation.lastMessage = cleanText || (type === "image" ? "📷 Photo" : type === "video" ? "🎬 Video" : type === "audio" ? "🎤 Audio" : "📎 Attachment");
@@ -591,11 +595,13 @@ const sendConversationMessage = async (req, res) => {
     const populated = await populateMessage(createdMessage._id);
     const formatted = {
       ...safeMessage(populated, req.user._id),
-      clientMessageId: clientMessageId || null,
+      clientMessageId: clientMessageId ? String(clientMessageId).slice(0, 200) : null,
     };
     const io = req.app.get("io");
     if (io) {
+      // Frontend must send through either REST or Socket.IO for one message, not both.
       io.to(String(req.user._id)).emit("message_sent", formatted);
+      io.to(String(conversation._id)).emit("new_message", formatted);
       io.to(String(conversation._id)).emit("receive_message", formatted);
       if (conversation.isGroup) {
         (conversation.participants || []).map(toId).filter((participantId) => participantId && participantId !== String(req.user._id))
@@ -665,7 +671,13 @@ const markAsRead = async (req, res) => {
 
     const now = new Date();
     await Message.updateMany(
-      { conversation: conversation._id, recipient: req.user._id, isRead: false, deletedFor: { $ne: req.user._id } },
+      {
+        conversation: conversation._id,
+        recipient: req.user._id,
+        isRead: false,
+        deletedFor: { $ne: req.user._id },
+        isDeletedForEveryone: { $ne: true },
+      },
       { $set: { isRead: true, readAt: now } }
     );
     const unreadCount = await getUnreadCount(conversation._id, req.user._id);

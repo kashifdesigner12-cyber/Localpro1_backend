@@ -749,12 +749,37 @@ const sendMessage = async (req, res) => {
     // Persist message
     // -------------------------------------------------
 
-    const resolvedReplyToId =
-      replyToId || replyTo
-        ? isValidObjectId(replyToId || replyTo)
-          ? new mongoose.Types.ObjectId(String(replyToId || replyTo))
-          : null
-        : null;
+    // Validate replies instead of silently dropping an invalid reply ID.
+    // A reply must point to a visible message in this same conversation.
+    const rawReplyToId = replyToId || replyTo || null;
+    let resolvedReplyToId = null;
+
+    if (rawReplyToId) {
+      if (!isValidObjectId(rawReplyToId)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid reply message ID.",
+        });
+      }
+
+      const replyTarget = await Message.findById(rawReplyToId)
+        .select("_id conversation isDeletedForEveryone deletedFor")
+        .lean();
+
+      if (
+        !replyTarget ||
+        String(replyTarget.conversation) !== String(conversation._id) ||
+        replyTarget.isDeletedForEveryone ||
+        getDeletedForUser(replyTarget, currentUserId)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "The reply target is unavailable in this conversation.",
+        });
+      }
+
+      resolvedReplyToId = new mongoose.Types.ObjectId(String(rawReplyToId));
+    }
 
     const createdMessage = await Message.create({
       conversation: conversation._id,
@@ -791,8 +816,16 @@ const sendMessage = async (req, res) => {
       Message.findById(createdMessage._id)
     ).lean();
 
+    // Keep the send response valid even if population unexpectedly returns null.
     const formattedMessage = {
-      ...safeMessage(populatedCreated, currentUserId),
+      ...safeMessage(
+        populatedCreated || {
+          ...createdMessage.toObject(),
+          sender: req.user,
+          recipient: recipientUser,
+        },
+        currentUserId
+      ),
       clientMessageId: clientMessageId || null,
     };
 

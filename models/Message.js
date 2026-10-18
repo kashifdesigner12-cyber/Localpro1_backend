@@ -28,6 +28,8 @@ const MessageSchema = new mongoose.Schema(
       index: true,
     },
 
+    // For direct conversations this is the other participant. For group
+    // conversations it may remain null because there can be multiple recipients.
     recipient: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -46,6 +48,7 @@ const MessageSchema = new mongoose.Schema(
       type: String,
       trim: true,
       default: "",
+      maxlength: [20000, "Message cannot exceed 20000 characters."],
     },
 
     // `message` is retained as a compatibility alias for older clients.
@@ -53,6 +56,7 @@ const MessageSchema = new mongoose.Schema(
       type: String,
       trim: true,
       default: "",
+      maxlength: [20000, "Message cannot exceed 20000 characters."],
     },
 
     messageType: {
@@ -172,8 +176,8 @@ const MessageSchema = new mongoose.Schema(
   }
 );
 
-// Normalize body/message compatibility and reject empty messages, while
-// allowing attachment-only messages and messages deleted for everyone.
+// Keep legacy body/message fields synchronized and allow attachment-only
+// messages. Deleted messages are allowed to have an empty body.
 MessageSchema.pre("validate", function (next) {
   if (this.isDeletedForEveryone) {
     return next();
@@ -181,27 +185,24 @@ MessageSchema.pre("validate", function (next) {
 
   const normalizedBody =
     typeof this.body === "string" ? this.body.trim() : "";
-
   const normalizedMessage =
     typeof this.message === "string" ? this.message.trim() : "";
-
-  const hasAttachments =
-    Array.isArray(this.attachments) && this.attachments.length > 0;
 
   if (normalizedBody && !normalizedMessage) {
     this.message = normalizedBody;
   } else if (normalizedMessage && !normalizedBody) {
     this.body = normalizedMessage;
   } else if (normalizedBody && normalizedMessage) {
-    // Keep both fields synchronized for legacy clients.
     this.body = normalizedBody;
     this.message = normalizedBody;
   }
 
   const hasText = Boolean(
-    (this.body && this.body.trim()) ||
-      (this.message && this.message.trim())
+    (typeof this.body === "string" && this.body.trim()) ||
+      (typeof this.message === "string" && this.message.trim())
   );
+  const hasAttachments =
+    Array.isArray(this.attachments) && this.attachments.length > 0;
 
   if (!hasText && !hasAttachments) {
     this.invalidate(
@@ -210,14 +211,17 @@ MessageSchema.pre("validate", function (next) {
     );
   }
 
-  next();
+  return next();
 });
 
-// Query indexes for chronological history, unread counts, and sender history.
+// Indexes for chronological history, unread counts, sender history, and
+// per-user deletion filtering.
 MessageSchema.index({ conversation: 1, createdAt: 1 });
 MessageSchema.index({ conversation: 1, createdAt: -1 });
 MessageSchema.index({ recipient: 1, isRead: 1 });
 MessageSchema.index({ sender: 1, createdAt: -1 });
 MessageSchema.index({ conversation: 1, deletedFor: 1 });
 
-module.exports = mongoose.model("Message", MessageSchema);
+// Avoid recompilation errors when the model is loaded more than once.
+module.exports =
+  mongoose.models.Message || mongoose.model("Message", MessageSchema);

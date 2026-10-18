@@ -12,6 +12,9 @@ const MESSAGE_TYPES = [
   "system",
 ];
 
+const CONVERSATION_STATUSES = ["open", "closed", "archived"];
+const CONVERSATION_CHANNELS = ["chat", "sms", "email", "call", "multi"];
+
 const ConversationSchema = new mongoose.Schema(
   {
     participants: {
@@ -28,6 +31,9 @@ const ConversationSchema = new mongoose.Schema(
           return (
             Array.isArray(participants) &&
             participants.length >= 2 &&
+            participants.every((participant) =>
+              mongoose.Types.ObjectId.isValid(String(participant))
+            ) &&
             new Set(participants.map(String)).size === participants.length
           );
         },
@@ -38,6 +44,7 @@ const ConversationSchema = new mongoose.Schema(
     isGroup: {
       type: Boolean,
       default: false,
+      index: true,
     },
 
     groupName: {
@@ -104,18 +111,20 @@ const ConversationSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ["open", "closed", "archived"],
+      enum: CONVERSATION_STATUSES,
       default: "open",
       index: true,
     },
 
     channel: {
       type: String,
-      enum: ["chat", "sms", "email", "call", "multi"],
+      enum: CONVERSATION_CHANNELS,
       default: "chat",
       index: true,
     },
 
+    // Legacy CRM compatibility: some existing conversations are associated
+    // with a primary user rather than only the participants array.
     userId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -146,6 +155,8 @@ ConversationSchema.index({ lastMessageAt: -1 });
 // Supports channel/status filters used by CRM conversation lists.
 ConversationSchema.index({ channel: 1, status: 1, lastMessageAt: -1 });
 
+// Keep the conversation list's updatedAt aligned with message activity when
+// lastMessageAt is newer. Normal Mongoose timestamp behavior remains intact.
 ConversationSchema.pre("save", function syncUpdatedAtWithLastMessageAt(next) {
   if (
     this.lastMessageAt &&
@@ -157,4 +168,8 @@ ConversationSchema.pre("save", function syncUpdatedAtWithLastMessageAt(next) {
   next();
 });
 
-module.exports = mongoose.model("Conversation", ConversationSchema);
+// Avoid OverwriteModelError when this module is loaded more than once in
+// development environments or by test runners.
+module.exports =
+  mongoose.models.Conversation ||
+  mongoose.model("Conversation", ConversationSchema);
