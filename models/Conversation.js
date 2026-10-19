@@ -28,16 +28,21 @@ const ConversationSchema = new mongoose.Schema(
       default: [],
       validate: {
         validator(participants) {
+          if (!Array.isArray(participants) || participants.length < 2) {
+            return false;
+          }
+
+          const participantIds = participants.map((participant) =>
+            String(participant)
+          );
+
           return (
-            Array.isArray(participants) &&
-            participants.length >= 2 &&
-            participants.every((participant) =>
-              mongoose.Types.ObjectId.isValid(String(participant))
-            ) &&
-            new Set(participants.map(String)).size === participants.length
+            participantIds.every((id) => mongoose.Types.ObjectId.isValid(id)) &&
+            new Set(participantIds).size === participantIds.length
           );
         },
-        message: "A conversation requires at least two unique participants.",
+        message:
+          "A conversation requires at least two unique valid participants.",
       },
     },
 
@@ -123,8 +128,6 @@ const ConversationSchema = new mongoose.Schema(
       index: true,
     },
 
-    // Legacy CRM compatibility: some existing conversations are associated
-    // with a primary user rather than only the participants array.
     userId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -145,22 +148,22 @@ const ConversationSchema = new mongoose.Schema(
   }
 );
 
-// Supports listing a user's conversations with the newest activity first.
+// High-speed compound indexes for fast sorting and querying conversation lists
 ConversationSchema.index({ participants: 1, lastMessageAt: -1 });
-
-// Supports general conversation-list sorting and legacy CRM conversation views.
+ConversationSchema.index({
+  participants: 1,
+  status: 1,
+  lastMessageAt: -1,
+});
+ConversationSchema.index({ channel: 1, status: 1, lastMessageAt: -1 });
 ConversationSchema.index({ updatedAt: -1 });
 ConversationSchema.index({ lastMessageAt: -1 });
 
-// Supports channel/status filters used by CRM conversation lists.
-ConversationSchema.index({ channel: 1, status: 1, lastMessageAt: -1 });
-
-// Keep the conversation list's updatedAt aligned with message activity when
-// lastMessageAt is newer. Normal Mongoose timestamp behavior remains intact.
+// Keep updatedAt aligned with newer message activity
 ConversationSchema.pre("save", function syncUpdatedAtWithLastMessageAt(next) {
   if (
     this.lastMessageAt &&
-    (!this.updatedAt || this.lastMessageAt > this.updatedAt)
+    (!this.updatedAt || this.lastMessageAt.getTime() > this.updatedAt.getTime())
   ) {
     this.updatedAt = this.lastMessageAt;
   }
@@ -168,8 +171,6 @@ ConversationSchema.pre("save", function syncUpdatedAtWithLastMessageAt(next) {
   next();
 });
 
-// Avoid OverwriteModelError when this module is loaded more than once in
-// development environments or by test runners.
 module.exports =
   mongoose.models.Conversation ||
   mongoose.model("Conversation", ConversationSchema);

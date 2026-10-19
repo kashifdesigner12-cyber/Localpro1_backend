@@ -28,8 +28,6 @@ const MessageSchema = new mongoose.Schema(
       index: true,
     },
 
-    // For direct conversations this is the other participant. For group
-    // conversations it may remain null because there can be multiple recipients.
     recipient: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -51,7 +49,6 @@ const MessageSchema = new mongoose.Schema(
       maxlength: [20000, "Message cannot exceed 20000 characters."],
     },
 
-    // `message` is retained as a compatibility alias for older clients.
     message: {
       type: String,
       trim: true,
@@ -176,17 +173,13 @@ const MessageSchema = new mongoose.Schema(
   }
 );
 
-// Keep legacy body/message fields synchronized and allow attachment-only
-// messages. Deleted messages are allowed to have an empty body.
 MessageSchema.pre("validate", function (next) {
   if (this.isDeletedForEveryone) {
     return next();
   }
 
-  const normalizedBody =
-    typeof this.body === "string" ? this.body.trim() : "";
-  const normalizedMessage =
-    typeof this.message === "string" ? this.message.trim() : "";
+  const normalizedBody = typeof this.body === "string" ? this.body.trim() : "";
+  const normalizedMessage = typeof this.message === "string" ? this.message.trim() : "";
 
   if (normalizedBody && !normalizedMessage) {
     this.message = normalizedBody;
@@ -201,27 +194,20 @@ MessageSchema.pre("validate", function (next) {
     (typeof this.body === "string" && this.body.trim()) ||
       (typeof this.message === "string" && this.message.trim())
   );
-  const hasAttachments =
-    Array.isArray(this.attachments) && this.attachments.length > 0;
+  const hasAttachments = Array.isArray(this.attachments) && this.attachments.length > 0;
 
   if (!hasText && !hasAttachments) {
-    this.invalidate(
-      "body",
-      "Message text or at least one attachment is required."
-    );
+    this.invalidate("body", "Message text or at least one attachment is required.");
   }
 
   return next();
 });
 
-// Indexes for chronological history, unread counts, sender history, and
-// per-user deletion filtering.
+// Indexes for fast chronological sorting and filtering
 MessageSchema.index({ conversation: 1, createdAt: 1 });
 MessageSchema.index({ conversation: 1, createdAt: -1 });
 MessageSchema.index({ recipient: 1, isRead: 1 });
 MessageSchema.index({ sender: 1, createdAt: -1 });
 MessageSchema.index({ conversation: 1, deletedFor: 1 });
 
-// Avoid recompilation errors when the model is loaded more than once.
-module.exports =
-  mongoose.models.Message || mongoose.model("Message", MessageSchema);
+module.exports = mongoose.models.Message || mongoose.model("Message", MessageSchema);

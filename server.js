@@ -9,14 +9,11 @@ const express = require("express");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const multer = require("multer");
-const mongoose = require("mongoose");
-const { Server } = require("socket.io");
-const jwt = require("jsonwebtoken");
 
 const connectDB = require("./config/db");
-const Conversation = require("./models/Conversation");
-const Message = require("./models/Message");
-const User = require("./models/User");
+const { corsOptions, socketCorsOptions } = require("./config/cors");
+const setupSocket = require("./config/socket");
+const registerRoutes = require("./routes/index");
 
 const {
   startAttendanceEmailScheduler,
@@ -30,756 +27,26 @@ const PORT = process.env.PORT || 5000;
 
 app.disable("x-powered-by");
 
-// =====================================================
-// CORS
-// =====================================================
-
-function normalizeOrigin(value) {
-  if (!value || typeof value !== "string") return null;
-
-  try {
-    const parsed = new URL(value.trim());
-
-    if (!["http:", "https:"].includes(parsed.protocol)) {
-      return null;
-    }
-
-    return parsed.origin;
-  } catch {
-    return null;
-  }
-}
-
-const allowedOrigins = new Set([
-  "http://localhost:3000",
-  "http://127.0.0.1:3000",
-  "http://localhost:5173",
-  "https://localpro1.net",
-  "https://www.localpro1.net",
-]);
-
-function addConfiguredOrigins(value, variableName) {
-  if (!value) return;
-
-  for (const item of value.split(",")) {
-    const origin = normalizeOrigin(item);
-
-    if (origin) {
-      allowedOrigins.add(origin);
-      console.log(`[CORS] Configured origin: ${origin}`);
-    } else if (item.trim()) {
-      console.warn(`[CORS] Invalid URL in ${variableName}`);
-    }
-  }
-}
-
-addConfiguredOrigins(process.env.FRONTEND_URL, "FRONTEND_URL");
-addConfiguredOrigins(
-  process.env.FRONTEND_LOGIN_URL,
-  "FRONTEND_LOGIN_URL"
-);
-
-function corsOrigin(origin, callback) {
-  if (!origin) return callback(null, true);
-
-  const normalized = normalizeOrigin(origin);
-
-  if (normalized && allowedOrigins.has(normalized)) {
-    return callback(null, true);
-  }
-
-  console.warn(`[CORS] Blocked origin: ${origin}`);
-  return callback(new Error("Not allowed by CORS"));
-}
-
-const corsOptions = {
-  origin: corsOrigin,
-  credentials: true,
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: [
-    "Content-Type",
-    "Authorization",
-    "Accept",
-    "X-Requested-With",
-  ],
-  exposedHeaders: ["Content-Disposition"],
-  maxAge: 600,
-};
-
-const socketCorsOptions = {
-  origin: corsOrigin,
-  credentials: true,
-  methods: ["GET", "POST"],
-};
-
-// =====================================================
-// SOCKET.IO
-// =====================================================
-
-const io = new Server(server, {
-  cors: socketCorsOptions,
-  transports: ["websocket", "polling"],
-  pingInterval: 25000,
-  pingTimeout: 20000,
-  connectTimeout: 20000,
-  maxHttpBufferSize: 5e6,
-
-  connectionStateRecovery: {
-    maxDisconnectionDuration: 120000,
-    skipMiddlewares: false,
-  },
-});
-
+// Setup Socket.IO using modular handler
+const { io, getSocketStats } = setupSocket(server, socketCorsOptions);
 app.set("io", io);
 
-// userId -> Set of socket IDs
-const activeUsers = new Map();
-
-app.set("activeUsers", activeUsers);
-
-function addActiveSocket(userId, socketId) {
-  const id = String(userId);
-
-  if (!activeUsers.has(id)) {
-    activeUsers.set(id, new Set());
-  }
-
-  activeUsers.get(id).add(socketId);
-}
-
-function removeActiveSocket(userId, socketId) {
-  const id = String(userId);
-  const sockets = activeUsers.get(id);
-
-  if (!sockets) return false;
-
-  sockets.delete(socketId);
-
-  if (sockets.size === 0) {
-    activeUsers.delete(id);
-
-    const payload = { userId: id, status: "offline" };
-
-    // Emit legacy and current event names so existing clients keep working.
-    io.emit("update_user_status", payload);
-    io.emit("user_status_update", payload);
-    io.emit("user_offline", { userId: id });
-    io.emit("user:offline", { userId: id });
-
-    return true;
-  }
-
-  return false;
-}
-
-function getSocketStats() {
-  let connectedSockets = 0;
-
-  for (const sockets of activeUsers.values()) {
-    connectedSockets += sockets.size;
-  }
-
-  return {
-    connectedUsers: activeUsers.size,
-    connectedSockets,
-    transportConnections: io.engine.clientsCount,
-  };
-}
-
-function getTokenFromSocket(socket) {
-  const authorization =
-    socket.handshake.headers?.authorization || "";
-
-  const bearerToken = authorization.replace(/^Bearer\s+/i, "");
-
-  return (
-    socket.handshake.auth?.token ||
-    bearerToken ||
-    null
-  );
-}
-
-function getDecodedUserId(decoded) {
-  const id = decoded?.id || decoded?._id || decoded?.userId;
-
-  if (!id || !mongoose.Types.ObjectId.isValid(String(id))) {
-    return null;
-  }
-
-  return String(id);
-}
-
-function getDecodedRole(decoded) {
-  return String(
-    decoded?.role ||
-    decoded?.userRole ||
-    decoded?.accountType ||
-    ""
-  ).toLowerCase();
-}
-
-function replyToSocket(callback, result) {
-  if (typeof callback === "function") {
-    callback(result);
-  }
-}
-
-// =====================================================
-// SOCKET AUTHENTICATION
-// =====================================================
-
-// Every socket must provide a valid JWT.
-io.use(async (socket, next) => {
-  try {
-    if (!process.env.JWT_SECRET) {
-      console.error("[Socket.IO] JWT_SECRET is not configured.");
-      return next(new Error("Socket authentication unavailable."));
-    }
-
-    const token = getTokenFromSocket(socket);
-
-    if (!token) {
-      return next(new Error("Authentication required."));
-    }
-
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const userId = getDecodedUserId(decoded);
-
-    if (!userId) {
-      return next(new Error("Invalid authentication token."));
-    }
-
-    // Read the current role from MongoDB rather than trusting a possibly
-    // stale role claim embedded in the JWT. Also reject deleted accounts.
-    const user = await User.findById(userId).select("_id role").lean();
-
-    if (!user) {
-      return next(new Error("Authenticated user no longer exists."));
-    }
-
-    socket.data.userId = String(user._id);
-    socket.data.role = String(user.role || getDecodedRole(decoded)).toLowerCase();
-
-    return next();
-  } catch (error) {
-    console.warn(
-      `[Socket.IO] Authentication rejected: ${error.message}`
-    );
-
-    return next(new Error("Invalid or expired authentication token."));
-  }
-});
-
-// =====================================================
-// CONVERSATION ACCESS
-// =====================================================
-
-async function canJoinConversation(userId, role, conversationId) {
-  if (
-    typeof conversationId !== "string" ||
-    !mongoose.Types.ObjectId.isValid(conversationId)
-  ) {
-    return false;
-  }
-
-  const conversation = await Conversation.findById(conversationId)
-    .select("participants userId isGroup")
-    .lean();
-
-  if (!conversation) return false;
-
-  const participantIds = (conversation.participants || []).map(
-    (participant) => String(participant?._id || participant)
-  );
-
-  if (participantIds.includes(String(userId))) {
-    return true;
-  }
-
-  // Support legacy conversations that store userId.
-  if (String(conversation.userId || "") === String(userId)) {
-    return true;
-  }
-
-  // Preserve the existing administrative access policy.
-  if (role === "admin" || role === "manager") {
-    return true;
-  }
-
-  return false;
-}
-
-// =====================================================
-// SOCKET CONNECTION
-// =====================================================
-
-io.on("connection", (socket) => {
-  const connectedAt = Date.now();
-
-  const connectedUserId = socket.data.userId;
-  const connectedUserRole = socket.data.role || "";
-
-  console.log(
-    `[Socket.IO] Connected: ${socket.id}; ` +
-    `user=${connectedUserId}; ` +
-    `transport=${socket.conn.transport.name}; ` +
-    `origin=${socket.handshake.headers.origin || "none"}`
-  );
-
-  // Private room: controllers can continue using io.to(userId).
-  socket.join(connectedUserId);
-
-  addActiveSocket(connectedUserId, socket.id);
-
-  const onlinePayload = {
-    userId: connectedUserId,
-    status: "online",
-  };
-
-  // Compatibility aliases used by different versions of the frontend.
-  io.emit("update_user_status", onlinePayload);
-  io.emit("user_status_update", onlinePayload);
-  io.emit("user_online", { userId: connectedUserId });
-  io.emit("user:online", { userId: connectedUserId });
-
-  // Send the current presence snapshot to this socket.
-  socket.emit("online_users", Array.from(activeUsers.keys()));
-  socket.on("get_online_users", (callback) => {
-    const users = Array.from(activeUsers.keys());
-    if (typeof callback === "function") {
-      replyToSocket(callback, { success: true, users });
-    } else {
-      socket.emit("online_users", users);
-    }
-  });
-
-  // Legacy event retained. It cannot impersonate another user.
-  socket.on("user_join", (requestedUserId, callback) => {
-    if (
-      !requestedUserId ||
-      String(requestedUserId) !== connectedUserId
-    ) {
-      replyToSocket(callback, {
-        success: false,
-        message: "You can only join your own user room.",
-      });
-
-      return;
-    }
-
-    socket.join(connectedUserId);
-
-    replyToSocket(callback, {
-      success: true,
-      userId: connectedUserId,
-    });
-  });
-
-  // Join a conversation only after verifying access.
-  socket.on("join_room", async (roomId, callback) => {
-    if (typeof roomId !== "string" || !roomId.trim()) {
-      replyToSocket(callback, {
-        success: false,
-        message: "Missing or invalid conversation ID.",
-      });
-
-      return;
-    }
-
-    const normalizedRoomId = roomId.trim();
-
-    try {
-      const allowed = await canJoinConversation(
-        connectedUserId,
-        connectedUserRole,
-        normalizedRoomId
-      );
-
-      if (!allowed) {
-        replyToSocket(callback, {
-          success: false,
-          message: "You do not have access to this conversation.",
-        });
-
-        console.warn(
-          `[Socket.IO] Rejected room join: ` +
-          `user=${connectedUserId}, room=${normalizedRoomId}`
-        );
-
-        return;
-      }
-
-      socket.join(normalizedRoomId);
-
-      replyToSocket(callback, {
-        success: true,
-        roomId: normalizedRoomId,
-      });
-    } catch (error) {
-      console.error(
-        "[Socket.IO] Room authorization error:",
-        error
-      );
-
-      replyToSocket(callback, {
-        success: false,
-        message: "Unable to authorize conversation access.",
-      });
-    }
-  });
-
-  // =====================================================
-  // REAL-TIME MESSAGE SENDING
-  // =====================================================
-  // Compatibility text-send transport. This event persists a text message
-  // and emits message_sent / receive_message. A single frontend send action
-  // must use EITHER this event OR POST /api/messages, never both, or the
-  // same message may be stored twice. File uploads use the authenticated
-  // REST upload route. The REST message controller also emits real-time events.
-  socket.on("send_message", async (data = {}, callback) => {
-    const fail = (message, code = "MESSAGE_SEND_FAILED") => {
-      const result = { success: false, code, message };
-      replyToSocket(callback, result);
-      socket.emit("message_error", result);
-    };
-
-    try {
-      if (!data || typeof data !== "object" || Array.isArray(data)) {
-        return fail("Invalid message payload.", "INVALID_PAYLOAD");
-      }
-
-      const conversationId = String(data.conversationId || data.roomId || "").trim();
-      const body = String(data.body ?? data.message ?? data.content ?? "").trim();
-      const clientMessageId = data.clientMessageId
-        ? String(data.clientMessageId).slice(0, 128)
-        : undefined;
-
-      if (!mongoose.Types.ObjectId.isValid(conversationId)) {
-        return fail("A valid conversation ID is required.", "INVALID_CONVERSATION");
-      }
-
-      if (!body) {
-        return fail("Message text cannot be empty.", "EMPTY_MESSAGE");
-      }
-
-      if (body.length > 20000) {
-        return fail("Message text is too long.", "MESSAGE_TOO_LONG");
-      }
-
-      const allowed = await canJoinConversation(
-        connectedUserId,
-        connectedUserRole,
-        conversationId
-      );
-
-      if (!allowed) {
-        return fail("You do not have access to this conversation.", "FORBIDDEN");
-      }
-
-      const conversation = await Conversation.findById(conversationId)
-        .select("participants isGroup")
-        .populate("participants", "_id name email role avatar")
-        .lean();
-
-      if (!conversation) {
-        return fail("Conversation not found.", "CONVERSATION_NOT_FOUND");
-      }
-
-      const participants = Array.isArray(conversation.participants)
-        ? conversation.participants
-        : [];
-      const participantIds = participants
-        .map((participant) => String(participant?._id || participant || ""))
-        .filter(Boolean);
-
-      // Admins and managers retain the same administrative access granted
-      // by canJoinConversation. Other users must be actual participants.
-      if (
-        connectedUserRole !== "admin" &&
-        connectedUserRole !== "manager" &&
-        !participantIds.includes(connectedUserId)
-      ) {
-        return fail("You are not a participant in this conversation.", "FORBIDDEN");
-      }
-
-      const otherParticipants = participants.filter(
-        (participant) =>
-          String(participant?._id || participant || "") !== connectedUserId
-      );
-      const recipientId = conversation.isGroup
-        ? null
-        : String(otherParticipants[0]?._id || otherParticipants[0] || "") || null;
-
-      const message = await Message.create({
-        conversation: conversationId,
-        sender: connectedUserId,
-        recipient: recipientId,
-        body,
-        message: body,
-        messageType: "text",
-        attachments: [],
-        isRead: false,
-        readAt: null,
-      });
-
-      // Keep the conversation preview in sync with the persisted message.
-      // If this update fails, the message is still saved and can be returned.
-      try {
-        await Conversation.updateOne(
-          { _id: conversationId },
-          {
-            $set: {
-              lastMessage: body,
-              lastMessageType: "text",
-              lastMessageAt: message.createdAt || new Date(),
-              lastSender: connectedUserId,
-            },
-          }
-        );
-      } catch (previewError) {
-        console.error(
-          "[Socket.IO] Conversation preview update failed:",
-          previewError.message
-        );
-      }
-
-      const populatedMessage = await Message.findById(message._id)
-        .populate("sender", "_id name email phone role status avatar")
-        .populate("recipient", "_id name email phone role status avatar")
-        .lean();
-
-      const sender = populatedMessage?.sender || {
-        _id: connectedUserId,
-        id: connectedUserId,
-      };
-      const serializedMessage = {
-        ...populatedMessage,
-        id: String(populatedMessage?._id || message._id),
-        _id: String(populatedMessage?._id || message._id),
-        conversationId: String(conversationId),
-        sender,
-        recipient: populatedMessage?.recipient || null,
-        body,
-        message: body,
-        messageType: "text",
-        attachments: [],
-        clientMessageId,
-      };
-
-      // The sender receives message_sent for optimistic-message reconciliation.
-      // Other participants receive receive_message in their private user rooms,
-      // including tabs that have not joined the conversation room yet.
-      io.to(connectedUserId).emit("message_sent", serializedMessage);
-
-      for (const participantId of participantIds) {
-        if (participantId && participantId !== connectedUserId) {
-          io.to(participantId).emit("receive_message", serializedMessage);
-        }
-      }
-
-      const result = {
-        success: true,
-        message: serializedMessage,
-        data: serializedMessage,
-        clientMessageId,
-      };
-
-      replyToSocket(callback, result);
-    } catch (error) {
-      console.error("[Socket.IO] send_message failed:", error);
-      return fail("Unable to send message. Please try again.");
-    }
-  });
-
-  // Typing events must only be broadcast to conversations the sender can access.
-  const handleTypingEvent = async (data = {}, isTyping = true) => {
-    try {
-      const conversationId = String(
-        data.conversationId || data.roomId || ""
-      ).trim();
-
-      if (!mongoose.Types.ObjectId.isValid(conversationId)) return;
-
-      const allowed = await canJoinConversation(
-        connectedUserId,
-        connectedUserRole,
-        conversationId
-      );
-
-      if (!allowed) return;
-
-      const payload = {
-        conversationId,
-        userId: connectedUserId,
-        ...(isTyping
-          ? { userName: String(data.userName || data.senderName || "").slice(0, 120) }
-          : {}),
-      };
-
-      if (isTyping) {
-        socket.to(conversationId).emit("typing:start", payload);
-        socket.to(conversationId).emit("user_typing", payload);
-        socket.to(conversationId).emit("typing", payload);
-      } else {
-        socket.to(conversationId).emit("typing:stop", payload);
-        socket.to(conversationId).emit("user_stopped_typing", payload);
-        socket.to(conversationId).emit("stop_typing", payload);
-      }
-    } catch (error) {
-      console.error("[Socket.IO] Typing event failed:", error.message);
-    }
-  };
-
-  socket.on("typing:start", (data = {}) => handleTypingEvent(data, true));
-  socket.on("user_typing", (data = {}) => handleTypingEvent(data, true));
-  socket.on("typing", (data = {}) => handleTypingEvent(data, true));
-  socket.on("typing:stop", (data = {}) => handleTypingEvent(data, false));
-  socket.on("user_stopped_typing", (data = {}) => handleTypingEvent(data, false));
-  socket.on("stop_typing", (data = {}) => handleTypingEvent(data, false));
-
-  socket.on("leave_room", async (roomId, callback) => {
-    if (typeof roomId !== "string" || !roomId.trim()) {
-      replyToSocket(callback, {
-        success: false,
-        message: "A valid room ID is required.",
-      });
-
-      return;
-    }
-
-    const normalizedRoomId = roomId.trim();
-
-    if (normalizedRoomId === connectedUserId) {
-      replyToSocket(callback, {
-        success: false,
-        message: "Cannot leave the private user room.",
-      });
-
-      return;
-    }
-
-    try {
-      const allowed = await canJoinConversation(
-        connectedUserId,
-        connectedUserRole,
-        normalizedRoomId
-      );
-
-      if (!allowed) {
-        replyToSocket(callback, {
-          success: false,
-          message: "You do not have access to this conversation.",
-        });
-        return;
-      }
-
-      await socket.leave(normalizedRoomId);
-
-      replyToSocket(callback, {
-        success: true,
-        roomId: normalizedRoomId,
-      });
-    } catch (error) {
-      console.error("[Socket.IO] Leave room authorization error:", error);
-      replyToSocket(callback, {
-        success: false,
-        message: "Unable to leave conversation room.",
-      });
-    }
-  });
-
-  socket.conn.on("upgrade", (transport) => {
-    console.log(
-      `[Socket.IO] Transport upgraded for ${socket.id}: ${transport.name}`
-    );
-  });
-
-  socket.on("disconnect", (reason) => {
-    removeActiveSocket(connectedUserId, socket.id);
-
-    console.log(
-      `[Socket.IO] User ${connectedUserId} disconnected: ${reason}; ` +
-      `connected for ${Date.now() - connectedAt}ms`
-    );
-  });
-
-  socket.on("error", (error) => {
-    console.error(
-      `[Socket.IO] Error on ${socket.id}:`,
-      error.message
-    );
-  });
-});
-
-io.engine.on("connection_error", (error) => {
-  console.error("[Socket.IO] Connection error:", {
-    code: error.code,
-    message: error.message,
-    context: error.context,
-  });
-});
-
-// =====================================================
-// ROUTER LOADER
-// =====================================================
-
-const loadRouter = (routePath) => {
-  const routeModule = require(routePath);
-
-  if (typeof routeModule === "function") {
-    return routeModule;
-  }
-
-  if (
-    routeModule &&
-    typeof routeModule.router === "function"
-  ) {
-    return routeModule.router;
-  }
-
-  if (
-    routeModule &&
-    typeof routeModule.default === "function"
-  ) {
-    return routeModule.default;
-  }
-
-  console.error(`[Server] Invalid router export: ${routePath}`);
-
-  throw new TypeError(
-    `Route file ${routePath} does not export an Express router.`
-  );
-};
-
-// =====================================================
-// UPLOADS
-// =====================================================
-
+// Upload Directories Setup
 const uploadsDir = path.join(__dirname, "uploads");
 const chatUploadsDir = path.join(uploadsDir, "chat");
 const taskUploadsDir = path.join(uploadsDir, "tasks");
 
-// Ensure the upload root and both uploader destinations exist on deployment.
-// The /uploads static mount below serves files from these subdirectories as:
-//   /uploads/chat/<filename>
-//   /uploads/tasks/<filename>
 for (const directory of [uploadsDir, chatUploadsDir, taskUploadsDir]) {
   fs.mkdirSync(directory, { recursive: true });
 }
 
-// =====================================================
-// EXPRESS MIDDLEWARE
-// =====================================================
-
+// Express Middleware
 app.use(cors(corsOptions));
 app.use(cookieParser());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
-// =====================================================
-// STATIC FILES
-// =====================================================
-
+// Static Files
 app.use(
   "/uploads",
   express.static(uploadsDir, {
@@ -792,10 +59,7 @@ app.use(
   })
 );
 
-// =====================================================
-// HEALTH CHECKS
-// =====================================================
-
+// Health Checks
 app.get("/api/health", (req, res) => {
   res.status(200).json({
     success: true,
@@ -816,352 +80,73 @@ app.get("/health", (req, res) => {
   });
 });
 
-// =====================================================
-// ATTENDANCE EMAILS
-// =====================================================
-
+// Attendance Email Route
 app.post("/api/send-attendance-reminders", async (req, res) => {
   try {
-    console.log("[Attendance Email] Manual sending started.");
-
     const result = await sendDailyAttendanceEmails();
-
-    console.log("[Attendance Email] Completed:", result);
-
-    return res.status(200).json({
-      success: true,
-      message: "Attendance reminder emails sent successfully.",
-      result,
-    });
+    return res.status(200).json({ success: true, message: "Attendance reminder emails sent.", result });
   } catch (error) {
-    console.error("[Attendance Email] Error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to send attendance reminder emails.",
-    });
+    return res.status(500).json({ success: false, message: "Failed to send attendance reminder emails." });
   }
 });
 
-// =====================================================
-// API ROUTES
-// =====================================================
+// Register All API Routes cleanly via modular router loader
+registerRoutes(app);
 
-const routes = [
-  ["/api/auth", "./routes/authRoutes"],
-  ["/api/users", "./routes/userRoutes"],
-  ["/api/signup-requests", "./routes/signupRequestRoutes"],
-  ["/api/leave-requests", "./routes/leaveRequestRoutes"],
-  ["/api/notifications", "./routes/notificationRoutes"],
-  ["/api/tasks", "./routes/taskRoutes"],
-  ["/api/dashboard", "./routes/dashboardRoutes"],
-  ["/api/conversations", "./routes/conversationRoutes"],
-  ["/api/messages", "./routes/messageRoutes"],
-  ["/api/attendance", "./routes/attendanceRoutes"],
-  ["/api/events", "./routes/eventRoutes"],
-  ["/api/calendar", "./routes/calendarRoutes"],
-  ["/api/appointments", "./routes/eventRoutes"],
-  ["/api/calls", "./routes/callRoutes"],
-  ["/api/contacts", "./routes/contactRoutes"],
-  ["/api/leads", "./routes/contactRoutes"],
-  ["/api/emails", "./routes/emailRoutes"],
-  ["/api/media", "./routes/mediaRoutes"],
-  ["/api/files", "./routes/mediaRoutes"],
-  ["/api/campaigns", "./routes/campaignRoutes"],
-  ["/api/ai-agents", "./routes/agentRoutes"],
-  ["/api/agents", "./routes/agentRoutes"],
-  ["/api/analytics", "./routes/analyticsRoutes"],
-  ["/api/settings", "./routes/settingsRoutes"],
-  ["/api/activity", "./routes/activityRoutes"],
-];
-
-for (const [prefix, routePath] of routes) {
-  app.use(prefix, loadRouter(routePath));
-}
-
-// =====================================================
-// 404
-// =====================================================
-
+// 404 Handler
 app.use((req, res) => {
-  console.warn(`[404] ${req.method} ${req.originalUrl}`);
-
-  res.status(404).json({
-    success: false,
-    message: `Route ${req.originalUrl} not found`,
-  });
+  res.status(404).json({ success: false, message: `Route ${req.originalUrl} not found` });
 });
 
-// =====================================================
-// GLOBAL ERROR HANDLER
-// =====================================================
-
+// Global Error Handler
 app.use((error, req, res, next) => {
-  console.error("[Server Error]", {
-    method: req.method,
-    url: req.originalUrl,
-    message: error.message,
-    stack:
-      process.env.NODE_ENV === "production"
-        ? undefined
-        : error.stack,
-  });
-
   if (res.headersSent) return next(error);
-
   if (error instanceof multer.MulterError) {
-    const message =
-      error.code === "LIMIT_FILE_SIZE"
-        ? "File size exceeds the configured upload limit."
-        : `File upload error: ${error.message}`;
-
-    return res.status(400).json({
-      success: false,
-      message,
-    });
+    return res.status(400).json({ success: false, message: `File upload error: ${error.message}` });
   }
-
   if (error.message === "Not allowed by CORS") {
-    return res.status(403).json({
-      success: false,
-      message: "Origin is not allowed by CORS.",
-    });
+    return res.status(403).json({ success: false, message: "Origin is not allowed by CORS." });
   }
-
-  return res.status(500).json({
-    success: false,
-    message: "Internal server error.",
-  });
+  return res.status(500).json({ success: false, message: "Internal server error." });
 });
 
-// =====================================================
-// SCHEDULER STATE
-// =====================================================
-
+// Schedulers & Server Boot
 let attendanceScheduler = null;
 let attendanceEmailSchedulerStarted = false;
 let shuttingDown = false;
 let serverStarted = false;
 
-// =====================================================
-// ATTENDANCE SCHEDULER
-// =====================================================
-
 const startAttendanceScheduler = () => {
   try {
-    const {
-      processAttendanceNotifications,
-    } = require("./controllers/attendanceController");
-
-    if (typeof processAttendanceNotifications !== "function") {
-      console.warn("[Attendance] Processing function unavailable.");
-      return;
-    }
-
-    if (attendanceScheduler) return;
-
-    Promise.resolve()
-      .then(() => processAttendanceNotifications())
-      .then((result) => {
-        console.log(
-          "[Attendance] Initial processing completed:",
-          result
-        );
-      })
-      .catch((error) => {
-        console.error(
-          "[Attendance] Initial processing error:",
-          error
-        );
-      });
+    const { processAttendanceNotifications } = require("./controllers/attendanceController");
+    if (typeof processAttendanceNotifications !== "function" || attendanceScheduler) return;
 
     attendanceScheduler = setInterval(async () => {
       if (shuttingDown) return;
-
       try {
-        const result = await processAttendanceNotifications();
-
-        console.log("[Attendance] Scheduler completed:", result);
-      } catch (error) {
-        console.error("[Attendance] Scheduler error:", error);
-      }
+        await processAttendanceNotifications();
+      } catch (error) {}
     }, 60 * 1000);
-
-    console.log("[Attendance] Scheduler started (60 seconds).");
-  } catch (error) {
-    console.error(
-      "[Attendance] Failed to start scheduler:",
-      error
-    );
-  }
+  } catch (error) {}
 };
-
-// =====================================================
-// ATTENDANCE EMAIL SCHEDULER
-// =====================================================
-
-const startAttendanceEmailSchedulerSafe = () => {
-  try {
-    if (typeof startAttendanceEmailScheduler !== "function") {
-      console.warn("[Attendance Email] Scheduler unavailable.");
-      return;
-    }
-
-    if (attendanceEmailSchedulerStarted) return;
-
-    startAttendanceEmailScheduler();
-    attendanceEmailSchedulerStarted = true;
-
-    console.log("[Attendance Email] Scheduler started.");
-  } catch (error) {
-    console.error(
-      "[Attendance Email] Scheduler startup failed:",
-      error
-    );
-  }
-};
-
-const stopAttendanceEmailSchedulerSafe = () => {
-  try {
-    if (
-      typeof stopAttendanceEmailScheduler !== "function" ||
-      !attendanceEmailSchedulerStarted
-    ) {
-      return;
-    }
-
-    stopAttendanceEmailScheduler();
-    attendanceEmailSchedulerStarted = false;
-
-    console.log("[Attendance Email] Scheduler stopped.");
-  } catch (error) {
-    console.error(
-      "[Attendance Email] Scheduler shutdown failed:",
-      error
-    );
-  }
-};
-
-// =====================================================
-// START SERVER
-// =====================================================
 
 const startServer = async () => {
   try {
     await connectDB();
-
     if (shuttingDown) return;
-
-    console.log("[Database] MongoDB connection established.");
-
-    server.on("error", (error) => {
-      console.error("[Server] HTTP server error:", error);
-
-      if (error.code === "EADDRINUSE") {
-        console.error(`[Server] Port ${PORT} is already in use.`);
-      }
-    });
 
     server.listen(PORT, "0.0.0.0", () => {
       serverStarted = true;
-
-      console.log(`[Server] Running on port ${PORT}`);
-      console.log(
-        `[Environment] ${process.env.NODE_ENV || "development"}`
-      );
-      console.log("[CORS] Allowed origins:", [...allowedOrigins]);
-      console.log("[Socket.IO] Real-time server initialized.");
-
+      console.log(`[Server] Running efficiently on port ${PORT}`);
       startAttendanceScheduler();
-      startAttendanceEmailSchedulerSafe();
+      if (typeof startAttendanceEmailScheduler === "function" && !attendanceEmailSchedulerStarted) {
+        startAttendanceEmailScheduler();
+        attendanceEmailSchedulerStarted = true;
+      }
     });
   } catch (error) {
-    console.error(
-      "[Server] Failed to start:",
-      error.stack || error.message
-    );
-
     process.exitCode = 1;
   }
 };
-
-// =====================================================
-// GRACEFUL SHUTDOWN
-// =====================================================
-
-const shutdown = async (signal) => {
-  if (shuttingDown) return;
-
-  shuttingDown = true;
-
-  console.log(`[Server] ${signal} received. Shutting down...`);
-
-  if (attendanceScheduler) {
-    clearInterval(attendanceScheduler);
-    attendanceScheduler = null;
-  }
-
-  stopAttendanceEmailSchedulerSafe();
-
-  const forceShutdownTimer = setTimeout(() => {
-    console.error("[Server] Forced shutdown after timeout.");
-    process.exit(1);
-  }, 10000);
-
-  forceShutdownTimer.unref();
-
-  try {
-    if (serverStarted && server.listening) {
-      await new Promise((resolve) => {
-        server.close((error) => {
-          if (error) {
-            console.error(
-              "[Server] HTTP close error:",
-              error.message
-            );
-          } else {
-            console.log("[Server] HTTP server closed.");
-          }
-
-          resolve();
-        });
-      });
-    }
-
-    await new Promise((resolve) => {
-      io.close(() => resolve());
-    });
-
-    const { closeMongoDB } = require("./config/db");
-
-    if (typeof closeMongoDB === "function") {
-      await closeMongoDB();
-    }
-
-    clearTimeout(forceShutdownTimer);
-
-    console.log("[Server] Shutdown completed.");
-    process.exit(0);
-  } catch (error) {
-    console.error("[Server] Shutdown error:", error.message);
-    process.exit(1);
-  }
-};
-
-process.on("SIGINT", () => void shutdown("SIGINT"));
-process.on("SIGTERM", () => void shutdown("SIGTERM"));
-
-process.on("unhandledRejection", (reason) => {
-  console.error("[Process] Unhandled promise rejection:", reason);
-});
-
-process.on("uncaughtException", (error) => {
-  console.error("[Process] Uncaught exception:", error);
-  void shutdown("uncaughtException");
-});
-
-// =====================================================
-// BOOT
-// =====================================================
 
 startServer();
