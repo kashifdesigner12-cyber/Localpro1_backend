@@ -16,7 +16,12 @@ const getMessages = async (req, res) => {
       return res.status(400).json({ success: false, message: "Invalid conversation ID." });
     }
 
-    const conversation = await Conversation.findById(conversationId).select("participants userId").lean();
+    // Populate participants to ensure real user names are retrieved instead of Unknown User
+    const conversation = await Conversation.findById(conversationId)
+      .select("participants userId")
+      .populate("participants", "name fullName email role avatar profileImage")
+      .lean();
+
     if (!conversation) {
       return res.status(404).json({ success: false, message: "Conversation not found." });
     }
