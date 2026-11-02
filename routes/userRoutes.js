@@ -1,107 +1,56 @@
-const express = require("express");
+import { Router } from "express";
+import mongoose from "mongoose";
 
-const {
-  getUsers,
-  getUserStats,
-  getUserById,
+import {
   createUser,
+  getUsers,
   updateUser,
-  updateUserStatus,
-  updateUserRole,
   deleteUser,
-  getProfile,
-  updateProfile,
-  changePassword,
-} = require("../controllers/userController");
+  updateUserStatus,
+} from "../controllers/userController.js";
 
-const { protect, authorize } = require("../middleware/authMiddleware");
+import { protect } from "../middleware/authMiddleware.js";
+import allowRoles from "../middleware/roleMiddleware.js";
 
-const router = express.Router();
+const router = Router();
 
-// Every endpoint in this router requires a valid authenticated user.
+const validateUserId = (req, res, next) => {
+  if (!mongoose.isValidObjectId(req.params.id)) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid user ID.",
+    });
+  }
+
+  return next();
+};
+
 router.use(protect);
 
-// Profile routes must be declared before routes containing /:id.
-router.get("/profile", getProfile);
-router.put("/profile", updateProfile);
-router.patch("/profile", updateProfile);
+// Allow all authenticated users to fetch users list for chat contacts & task dropdowns
+router.get("/", getUsers);
 
-router.put("/profile/password", changePassword);
-router.patch("/profile/password", changePassword);
+router.post("/", allowRoles("admin"), createUser);
 
-// Backward-compatible aliases for clients using the older endpoint.
-router.put("/change-password", changePassword);
-router.patch("/change-password", changePassword);
-
-// User listing and creation are restricted to admin/manager roles.
-router.get("/stats", authorize("admin", "manager"), getUserStats);
-router.get("/", authorize("admin", "manager"), getUsers);
-router.post("/", authorize("admin", "manager"), createUser);
-
-// Attendance schedules are optional until the attendance controller implements
-// the dedicated handlers. Never substitute general user handlers here.
-let attendanceController = {};
-
-try {
-  attendanceController = require("../controllers/attendanceController");
-} catch (error) {
-  // Only tolerate the controller itself being absent. Re-throw errors caused by
-  // missing dependencies or bugs inside an existing attendance controller.
-  const isMissingAttendanceController =
-    error &&
-    error.code === "MODULE_NOT_FOUND" &&
-    typeof error.message === "string" &&
-    error.message.includes("../controllers/attendanceController");
-
-  if (!isMissingAttendanceController) {
-    throw error;
-  }
-}
-
-const unavailableScheduleHandler = (_req, res) =>
-  res.status(501).json({
-    success: false,
-    message: "Attendance schedule endpoints are not configured.",
-  });
-
-const getUserAttendanceSchedule =
-  typeof attendanceController.getUserAttendanceSchedule === "function"
-    ? attendanceController.getUserAttendanceSchedule
-    : unavailableScheduleHandler;
-
-const setUserAttendanceSchedule =
-  typeof attendanceController.setUserAttendanceSchedule === "function"
-    ? attendanceController.setUserAttendanceSchedule
-    : unavailableScheduleHandler;
-
-// These specific routes must stay above router.get("/:id", ...).
-router.get(
-  "/:id/attendance-schedule",
-  authorize("admin", "manager"),
-  getUserAttendanceSchedule
-);
-router.put(
-  "/:id/attendance-schedule",
-  authorize("admin", "manager"),
-  setUserAttendanceSchedule
-);
 router.patch(
-  "/:id/attendance-schedule",
-  authorize("admin", "manager"),
-  setUserAttendanceSchedule
+  "/:id/status",
+  allowRoles("admin"),
+  validateUserId,
+  updateUserStatus
 );
 
-// Admin/manager can manage status; only admin can change roles or delete users.
-router.put("/:id/status", authorize("admin", "manager"), updateUserStatus);
-router.patch("/:id/status", authorize("admin", "manager"), updateUserStatus);
+router.patch(
+  "/:id",
+  allowRoles("admin"),
+  validateUserId,
+  updateUser
+);
 
-router.put("/:id/role", authorize("admin"), updateUserRole);
-router.patch("/:id/role", authorize("admin"), updateUserRole);
+router.delete(
+  "/:id",
+  allowRoles("admin"),
+  validateUserId,
+  deleteUser
+);
 
-router.get("/:id", authorize("admin", "manager"), getUserById);
-router.put("/:id", authorize("admin", "manager"), updateUser);
-router.patch("/:id", authorize("admin", "manager"), updateUser);
-
-router.delete("/:id", authorize("admin"), deleteUser);
-
-module.exports = router;
+export default router;

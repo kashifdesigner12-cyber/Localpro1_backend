@@ -1,56 +1,18 @@
-const express = require('express');
-const {
-  getProfile,
-  updateProfile,
-  updatePassword,
-  getBusiness,
-  updateBusiness,
-  getPreferences,
-  updatePreferences,
-  getNotificationPreferences,
-  updateNotificationPreferences,
-  getIntegrations,
-  updateIntegrations,
-  getAllSettings
-} = require('../controllers/settingsController');
-const { protect } = require('../middleware/authMiddleware');
+import { Router } from "express";
+import { protect } from "../middleware/authMiddleware.js";
+import allowRoles from "../middleware/roleMiddleware.js";
+import {
+  getSettings,
+  updateSettings,
+} from "../controllers/settingsController.js";
 
-const router = express.Router();
+const router = Router();
 
+// Settings routes require authentication and admin access.
 router.use(protect);
+router.use(allowRoles("admin"));
 
-// ── Overall Settings Bundle ─────────────────────────────────────────────────
-router.get('/', getAllSettings);
+router.get("/", getSettings);
+router.patch("/", updateSettings);
 
-// ── Profile Settings ────────────────────────────────────────────────────────
-router.get('/profile', getProfile);
-router.put('/profile', updateProfile);
-router.patch('/profile', updateProfile);
-
-// ── Password Change ─────────────────────────────────────────────────────────
-router.put('/password', updatePassword);
-router.patch('/password', updatePassword);
-router.put('/change-password', updatePassword);
-router.patch('/change-password', updatePassword);
-
-// ── Business Settings ───────────────────────────────────────────────────────
-router.get('/business', getBusiness);
-router.put('/business', updateBusiness);
-router.patch('/business', updateBusiness);
-
-// ── User Preferences ────────────────────────────────────────────────────────
-router.get('/preferences', getPreferences);
-router.put('/preferences', updatePreferences);
-router.patch('/preferences', updatePreferences);
-
-// ── Notification Preferences ────────────────────────────────────────────────
-router.get('/notifications', getNotificationPreferences);
-router.put('/notifications', updateNotificationPreferences);
-router.patch('/notifications', updateNotificationPreferences);
-
-// ── Integrations ────────────────────────────────────────────────────────────
-router.get('/integrations', getIntegrations);
-router.put('/integrations', updateIntegrations);
-router.patch('/integrations', updateIntegrations);
-
-module.exports = router;
+export default router;

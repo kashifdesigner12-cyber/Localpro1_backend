@@ -1,311 +1,181 @@
-const mongoose = require("mongoose");
-const bcrypt = require("bcryptjs");
 
-// ============================================================
-// ATTENDANCE SCHEDULE SUB-SCHEMA
-// ============================================================
+import mongoose from "mongoose";
 
-const AttendanceScheduleSchema = new mongoose.Schema(
+const userSchema = new mongoose.Schema(
   {
-    // 0 = Sunday, 1 = Monday, ... 6 = Saturday
-    dayOfWeek: {
-      type: Number,
-      min: 0,
-      max: 6,
-    },
-
-    enabled: {
-      type: Boolean,
-      default: false,
-    },
-
-    startTime: {
+    username: {
       type: String,
+      required: [true, "Username is required"],
+      unique: true,
       trim: true,
-      default: "09:00",
+      lowercase: true,
+      minlength: 3,
+      maxlength: 50,
       match: [
-        /^$|^([01]\d|2[0-3]):([0-5]\d)$/,
-        "Start time must be in HH:mm format",
+        /^[a-z0-9._-]+$/,
+        "Username can contain letters, numbers, dots, underscores and hyphens only",
       ],
     },
 
-    endTime: {
-      type: String,
-      trim: true,
-      default: "17:00",
-      match: [
-        /^$|^([01]\d|2[0-3]):([0-5]\d)$/,
-        "End time must be in HH:mm format",
-      ],
-    },
-
-    windowStart: {
-      type: String,
-      trim: true,
-      default: "08:45",
-      match: [
-        /^$|^([01]\d|2[0-3]):([0-5]\d)$/,
-        "Window start time must be in HH:mm format",
-      ],
-    },
-
-    windowEnd: {
-      type: String,
-      trim: true,
-      default: "09:30",
-      match: [
-        /^$|^([01]\d|2[0-3]):([0-5]\d)$/,
-        "Window end time must be in HH:mm format",
-      ],
-    },
-
-    gracePeriodMinutes: {
-      type: Number,
-      default: 10,
-      min: 1,
-      max: 60,
-    },
-
-    timezone: {
-      type: String,
-      trim: true,
-      default: "UTC",
-    },
-  },
-  {
-    _id: false,
-  }
-);
-
-const defaultSchedule = () => ({
-  startTime: "09:00",
-  endTime: "17:00",
-  windowStart: "08:45",
-  windowEnd: "09:30",
-});
-
-// ============================================================
-// USER SCHEMA
-// ============================================================
-
-const UserSchema = new mongoose.Schema(
-  {
-    // BASIC USER INFORMATION
     name: {
       type: String,
-      required: [true, "Name is required"],
       trim: true,
+      maxlength: 100,
+      default: "",
     },
 
     email: {
       type: String,
-      required: [true, "Email is required"],
       unique: true,
+      sparse: true,
       lowercase: true,
       trim: true,
-      match: [/^\S+@\S+\.\S+$/, "Please provide a valid email"],
-      index: true,
-    },
-
-    phone: {
-      type: String,
-      trim: true,
-      default: "",
+      maxlength: 254,
+      default: undefined,
+      validate: {
+        validator(value) {
+          return (
+            value === undefined ||
+            value === null ||
+            value === "" ||
+            /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
+          );
+        },
+        message: "Invalid email address",
+      },
     },
 
     password: {
       type: String,
       required: [true, "Password is required"],
-      minlength: [6, "Password must be at least 6 characters"],
-      // Login code must use .select("+password") to retrieve the hash.
       select: false,
+      minlength: 8,
     },
 
-    // ROLE
-    // "support" is included because the messaging controller permits
-    // direct conversations with support users.
     role: {
       type: String,
-      enum: ["admin", "manager", "user", "support"],
+      enum: ["admin", "manager", "user"],
       default: "user",
-      index: true,
+      required: true,
     },
 
-    // USER STATUS
     status: {
       type: String,
-      enum: ["Active", "Pending", "Blocked", "Inactive"],
-      default: "Active",
-      index: true,
+      enum: ["active", "pending", "blocked", "inactive"],
+      default: "active",
+      required: true,
     },
 
-    isActive: {
-      type: Boolean,
-      default: true,
-    },
-
-    // SOFT DELETE STATUS
-    isDeleted: {
-      type: Boolean,
-      default: false,
-      index: true,
-    },
-
-    deletedAt: {
-      type: Date,
-      default: null,
-    },
-
-    // AVATAR
-    avatar: {
+    profilePicture: {
       type: String,
-      default: null,
-    },
-
-    // TWILIO
-    twilioPhoneNumber: {
-      type: String,
-      trim: true,
       default: "",
     },
 
-    // ATTENDANCE SETTINGS
-    attendanceSettings: {
-      enabled: {
+    jobTitle: {
+      type: String,
+      trim: true,
+      maxlength: 100,
+      default: "",
+    },
+
+    department: {
+      type: String,
+      trim: true,
+      maxlength: 100,
+      default: "",
+    },
+
+    phone: {
+      type: String,
+      trim: true,
+      maxlength: 30,
+      default: "",
+    },
+
+    location: {
+      type: String,
+      trim: true,
+      maxlength: 150,
+      default: "",
+    },
+
+    settings: {
+      emailNotifications: {
         type: Boolean,
-        default: false,
+        default: true,
       },
-      attendanceTime: {
+      taskNotifications: {
+        type: Boolean,
+        default: true,
+      },
+      attendanceNotifications: {
+        type: Boolean,
+        default: true,
+      },
+      appearance: {
         type: String,
-        trim: true,
-        default: "",
-        match: [
-          /^$|^([01]\d|2[0-3]):([0-5]\d)$/,
-          "Attendance time must be in HH:mm format",
-        ],
-      },
-      gracePeriodMinutes: {
-        type: Number,
-        default: 10,
-        min: 1,
-        max: 60,
-      },
-      timezone: {
-        type: String,
-        trim: true,
-        default: "UTC",
+        enum: ["light", "dark"],
+        default: "light",
       },
     },
 
-    // Keep Mixed fields for compatibility with existing controllers that
-    // store schedule objects in different shapes.
-    attendanceSchedule: {
-      type: mongoose.Schema.Types.Mixed,
-      default: defaultSchedule,
+    invitationTokenHash: {
+      type: String,
+      select: false,
+      default: undefined,
     },
 
-    workSchedule: {
-      type: mongoose.Schema.Types.Mixed,
-      default: defaultSchedule,
+    invitationExpiresAt: {
+      type: Date,
+      default: undefined,
     },
 
-    // BUSINESS INFORMATION
-    business: {
-      companyName: { type: String, default: "" },
-      website: { type: String, default: "" },
-      address: { type: String, default: "" },
-      city: { type: String, default: "" },
-      state: { type: String, default: "" },
-      zipCode: { type: String, default: "" },
-      country: { type: String, default: "" },
-      taxId: { type: String, default: "" },
-      industry: { type: String, default: "" },
+    passwordChangedAt: {
+      type: Date,
+      default: undefined,
     },
 
-    // USER PREFERENCES
-    preferences: {
-      theme: {
-        type: String,
-        enum: ["light", "dark", "system"],
-        default: "system",
-      },
-      language: {
-        type: String,
-        default: "en",
-      },
-      timezone: {
-        type: String,
-        trim: true,
-        default: "UTC",
-      },
-      dateFormat: {
-        type: String,
-        default: "YYYY-MM-DD",
-      },
-      attendanceSchedule: {
-        type: mongoose.Schema.Types.Mixed,
-        default: defaultSchedule,
-      },
-      workSchedule: {
-        type: mongoose.Schema.Types.Mixed,
-        default: defaultSchedule,
-      },
+    lastLoginAt: {
+      type: Date,
+      default: undefined,
     },
 
-    // NOTIFICATION PREFERENCES
-    notificationPreferences: {
-      emailNotifications: { type: Boolean, default: true },
-      pushNotifications: { type: Boolean, default: true },
-      taskUpdates: { type: Boolean, default: true },
-      appointmentAlerts: { type: Boolean, default: true },
-      messageAlerts: { type: Boolean, default: true },
-    },
-
-    // INTEGRATIONS
-    integrations: {
-      twilioEnabled: { type: Boolean, default: false },
-      sendgridEnabled: { type: Boolean, default: false },
-      googleCalendarConnected: { type: Boolean, default: false },
-      webhookUrl: { type: String, default: "" },
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
     },
   },
   {
     timestamps: true,
-    minimize: false,
+    versionKey: false,
   }
 );
 
-// Keep the schedule sub-schema available for future validation/use.
-// Existing schedule fields remain Mixed for backward compatibility.
-void AttendanceScheduleSchema;
-
-// ============================================================
-// HASH PASSWORD BEFORE SAVE
-// ============================================================
-
-UserSchema.pre("save", async function () {
-  if (!this.isModified("password")) {
-    return;
-  }
-
-  const salt = await bcrypt.genSalt(10);
-  this.password = await bcrypt.hash(this.password, salt);
+// Fast filtering by role and account status.
+userSchema.index({
+  role: 1,
+  status: 1,
 });
 
-// ============================================================
-// COMPARE PASSWORD
-// ============================================================
+// Fast chat contact filtering and alphabetical sorting.
+userSchema.index({
+  status: 1,
+  name: 1,
+  _id: 1,
+});
 
-UserSchema.methods.comparePassword = async function (candidatePassword) {
-  if (typeof candidatePassword !== "string" || !this.password) {
-    return false;
-  }
+// Existing user listing indexes.
+userSchema.index({
+  status: 1,
+  createdAt: -1,
+});
 
-  return bcrypt.compare(candidatePassword, this.password);
-};
+userSchema.index({
+  createdAt: -1,
+});
 
-// ============================================================
-// EXPORT
-// ============================================================
+const User =
+  mongoose.models.User || mongoose.model("User", userSchema);
 
-module.exports = mongoose.model("User", UserSchema);
+export default User;

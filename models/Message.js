@@ -1,93 +1,52 @@
-"use strict";
 
-const mongoose = require("mongoose");
+import mongoose from "mongoose";
 
-const MESSAGE_TYPES = [
-  "text",
-  "image",
-  "file",
-  "document",
-  "video",
-  "audio",
-  "system",
-];
-
-const MessageSchema = new mongoose.Schema(
+const messageSchema = new mongoose.Schema(
   {
     conversation: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Conversation",
-      required: [true, "Conversation is required"],
+      required: true,
       index: true,
     },
 
     sender: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      required: [true, "Sender is required"],
-      index: true,
+      required: true,
     },
 
-    recipient: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
+    clientMsgId: {
+      type: String,
       default: null,
-      index: true,
+      trim: true,
     },
 
-    replyTo: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Message",
-      default: null,
-      index: true,
-    },
-
-    body: {
+    text: {
       type: String,
       trim: true,
       default: "",
-      maxlength: [20000, "Message cannot exceed 20000 characters."],
     },
 
-    message: {
+    priority: {
       type: String,
-      trim: true,
-      default: "",
-      maxlength: [20000, "Message cannot exceed 20000 characters."],
-    },
-
-    messageType: {
-      type: String,
-      enum: MESSAGE_TYPES,
-      default: "text",
+      enum: ["standard", "important", "urgent"],
+      default: "standard",
     },
 
     attachments: [
       {
-        url: {
+        name: {
+          type: String,
+          default: "",
+        },
+        path: {
           type: String,
           required: true,
-          trim: true,
         },
-        filename: {
+        type: {
           type: String,
           default: "",
-          trim: true,
-        },
-        originalName: {
-          type: String,
-          default: "",
-          trim: true,
-        },
-        fileType: {
-          type: String,
-          default: "",
-          trim: true,
-        },
-        mimeType: {
-          type: String,
-          default: "",
-          trim: true,
         },
         size: {
           type: Number,
@@ -97,48 +56,31 @@ const MessageSchema = new mongoose.Schema(
       },
     ],
 
+    replyTo: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Message",
+      default: null,
+    },
+
     reactions: [
       {
+        user: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+        },
         emoji: {
           type: String,
           required: true,
-          trim: true,
-          maxlength: 32,
-        },
-        userId: {
-          type: mongoose.Schema.Types.ObjectId,
-          ref: "User",
-          required: true,
-        },
-        createdAt: {
-          type: Date,
-          default: Date.now,
         },
       },
     ],
 
-    isRead: {
-      type: Boolean,
-      default: false,
-      index: true,
-    },
-
-    readAt: {
-      type: Date,
-      default: null,
-    },
-
-    channel: {
-      type: String,
-      enum: ["chat", "sms", "email"],
-      default: "chat",
-    },
-
-    direction: {
-      type: String,
-      enum: ["inbound", "outbound", "internal"],
-      default: "internal",
-    },
+    readBy: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+      },
+    ],
 
     deletedFor: [
       {
@@ -152,20 +94,25 @@ const MessageSchema = new mongoose.Schema(
       default: false,
     },
 
-    deletedForEveryoneAt: {
+    isEdited: {
+      type: Boolean,
+      default: false,
+    },
+
+    editedAt: {
       type: Date,
       default: null,
     },
 
-    deletedBy: {
+    isPinned: {
+      type: Boolean,
+      default: false,
+    },
+
+    pinnedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       default: null,
-    },
-
-    metadata: {
-      type: mongoose.Schema.Types.Mixed,
-      default: {},
     },
   },
   {
@@ -173,41 +120,43 @@ const MessageSchema = new mongoose.Schema(
   }
 );
 
-MessageSchema.pre("validate", function (next) {
-  if (this.isDeletedForEveryone) {
-    return next();
-  }
-
-  const normalizedBody = typeof this.body === "string" ? this.body.trim() : "";
-  const normalizedMessage = typeof this.message === "string" ? this.message.trim() : "";
-
-  if (normalizedBody && !normalizedMessage) {
-    this.message = normalizedBody;
-  } else if (normalizedMessage && !normalizedBody) {
-    this.body = normalizedMessage;
-  } else if (normalizedBody && normalizedMessage) {
-    this.body = normalizedBody;
-    this.message = normalizedBody;
-  }
-
-  const hasText = Boolean(
-    (typeof this.body === "string" && this.body.trim()) ||
-      (typeof this.message === "string" && this.message.trim())
-  );
-  const hasAttachments = Array.isArray(this.attachments) && this.attachments.length > 0;
-
-  if (!hasText && !hasAttachments) {
-    this.invalidate("body", "Message text or at least one attachment is required.");
-  }
-
-  return next();
+// Fast conversation message history.
+messageSchema.index({
+  conversation: 1,
+  createdAt: -1,
+  _id: -1,
 });
 
-// Indexes for fast chronological sorting and filtering
-MessageSchema.index({ conversation: 1, createdAt: 1 });
-MessageSchema.index({ conversation: 1, createdAt: -1 });
-MessageSchema.index({ recipient: 1, isRead: 1 });
-MessageSchema.index({ sender: 1, createdAt: -1 });
-MessageSchema.index({ conversation: 1, deletedFor: 1 });
+// Fast message history filtering for deleted messages.
+messageSchema.index({
+  conversation: 1,
+  deletedFor: 1,
+  createdAt: -1,
+});
 
-module.exports = mongoose.models.Message || mongoose.model("Message", MessageSchema);
+// Fast duplicate-send / idempotency lookup.
+messageSchema.index(
+  {
+    conversation: 1,
+    sender: 1,
+    clientMsgId: 1,
+  },
+  {
+    partialFilterExpression: {
+      clientMsgId: { $type: "string" },
+    },
+  }
+);
+
+// Fast sender-based message lookups.
+messageSchema.index({
+  conversation: 1,
+  sender: 1,
+  createdAt: -1,
+});
+
+const Message =
+  mongoose.models.Message ||
+  mongoose.model("Message", messageSchema);
+
+export default Message;

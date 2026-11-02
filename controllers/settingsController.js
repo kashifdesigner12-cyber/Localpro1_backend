@@ -1,327 +1,332 @@
-const bcrypt = require('bcryptjs');
-const User = require('../models/User');
+import WorkspaceSettings from "../models/WorkspaceSettings.js";
 
-// Safe user serialization without heavy Base64 payload
-const safeUser = (user) => {
-  if (!user) return null;
+const QUERY_TIMEOUT_MS = 10000;
 
-  let cleanAvatar = user.avatar || null;
-  if (typeof cleanAvatar === 'string' && cleanAvatar.startsWith('data:image') && cleanAvatar.length > 1000) {
-    cleanAvatar = null;
+const DEFAULT_SETTINGS = {
+  workspaceName: "",
+  timezone: "Asia/Karachi",
+  dateFormat: "DD/MM/YYYY",
+  workStart: "09:00",
+  workEnd: "17:00",
+  lateGracePeriod: 10,
+  emailNotifications: true,
+  attendanceReminders: true,
+  securityAlerts: true,
+  requireStrongPasswords: true,
+  attendanceGpsEnabled: false,
+  officeLatitude: null,
+  officeLongitude: null,
+  attendanceRadiusMeters: 200,
+};
+
+const ALLOWED_FIELDS = Object.keys(DEFAULT_SETTINGS);
+
+const BOOLEAN_FIELDS = [
+  "emailNotifications",
+  "attendanceReminders",
+  "securityAlerts",
+  "requireStrongPasswords",
+  "attendanceGpsEnabled",
+];
+
+const isValidTime = (value) =>
+  typeof value === "string" &&
+  /^([01]\d|2[0-3]):([0-5]\d)$/.test(value);
+
+const isValidCoordinate = (value, min, max) => {
+  if (value === null || value === "") return true;
+
+  if (
+    typeof value !== "number" &&
+    typeof value !== "string"
+  ) {
+    return false;
   }
 
+  if (typeof value === "string" && value.trim() === "") {
+    return false;
+  }
+
+  const number = Number(value);
+
+  return Number.isFinite(number) && number >= min && number <= max;
+};
+
+const serializeSettings = (settings) => {
+  const plainSettings = settings?.toObject
+    ? settings.toObject()
+    : settings;
+
   return {
-    id: user._id,
-    _id: user._id,
-    name: user.name || '',
-    email: user.email || '',
-    phone: user.phone || '',
-    role: user.role || 'user',
-    status: user.status || 'Active',
-    avatar: cleanAvatar,
-    twilioPhoneNumber: user.twilioPhoneNumber || '',
-    business: user.business || {},
-    preferences: user.preferences || {},
-    notificationPreferences: user.notificationPreferences || {},
-    integrations: user.integrations || {},
-    createdAt: user.createdAt,
-    updatedAt: user.updatedAt
+    ...DEFAULT_SETTINGS,
+    ...(plainSettings || {}),
   };
 };
 
-// GET /api/settings/profile or GET /api/settings
-const getProfile = async (req, res) => {
+const getOrCreateSettings = async (userId) => {
+  let settings = await WorkspaceSettings.findOne()
+    .maxTimeMS(QUERY_TIMEOUT_MS)
+    .exec();
+
+  if (settings) return settings;
+
   try {
-    const user = await User.findById(req.user._id).select('-password').lean();
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found.' });
-    }
-    const safeUserData = safeUser(user);
-    return res.status(200).json({ success: true, user: safeUserData, data: safeUserData });
+    settings = await WorkspaceSettings.create({
+      ...DEFAULT_SETTINGS,
+      updatedBy: userId,
+    });
+
+    return settings;
   } catch (error) {
-    console.error('getProfile error:', error);
-    return res.status(500).json({ success: false, message: 'Server error retrieving profile settings.' });
+    // Another request may have created the settings simultaneously.
+    if (error.code === 11000) {
+      const existing = await WorkspaceSettings.findOne()
+        .maxTimeMS(QUERY_TIMEOUT_MS)
+        .exec();
+
+      if (existing) return existing;
+    }
+
+    throw error;
   }
 };
 
-// PUT /api/settings/profile or PATCH /api/settings/profile
-const updateProfile = async (req, res) => {
+export const getSettings = async (req, res, next) => {
   try {
-    const { name, phone, avatar } = req.body;
-    const user = await User.findById(req.user._id);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found.' });
+    const settings = await getOrCreateSettings(req.user._id);
+
+    return res.status(200).json({
+      success: true,
+      data: serializeSettings(settings),
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const updateSettings = async (req, res, next) => {
+  try {
+    if (
+      !req.body ||
+      typeof req.body !== "object" ||
+      Array.isArray(req.body)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Provide valid settings.",
+      });
     }
 
-    if (name !== undefined) {
-      if (!name || !name.trim()) {
-        return res.status(400).json({ success: false, message: 'Name cannot be empty.' });
+    const updates = {};
+
+    for (const field of ALLOWED_FIELDS) {
+      if (req.body[field] === undefined) continue;
+
+      const value = req.body[field];
+
+      if (BOOLEAN_FIELDS.includes(field)) {
+        if (typeof value !== "boolean") {
+          return res.status(400).json({
+            success: false,
+            message: `${field} must be true or false.`,
+          });
+        }
+
+        updates[field] = value;
+        continue;
       }
-      user.name = name.trim();
+
+      if (field === "lateGracePeriod") {
+        if (
+          value === "" ||
+          value === null ||
+          (typeof value !== "number" && typeof value !== "string")
+        ) {
+          return res.status(400).json({
+            success: false,
+            message: "Late grace period must be between 0 and 180 minutes.",
+          });
+        }
+
+        const number = Number(value);
+
+        if (!Number.isInteger(number) || number < 0 || number > 180) {
+          return res.status(400).json({
+            success: false,
+            message: "Late grace period must be between 0 and 180 minutes.",
+          });
+        }
+
+        updates[field] = number;
+        continue;
+      }
+
+      if (field === "attendanceRadiusMeters") {
+        if (
+          value === "" ||
+          value === null ||
+          (typeof value !== "number" && typeof value !== "string")
+        ) {
+          return res.status(400).json({
+            success: false,
+            message: "Attendance radius must be between 10 and 10000 meters.",
+          });
+        }
+
+        const number = Number(value);
+
+        if (!Number.isFinite(number) || number < 10 || number > 10000) {
+          return res.status(400).json({
+            success: false,
+            message: "Attendance radius must be between 10 and 10000 meters.",
+          });
+        }
+
+        updates[field] = number;
+        continue;
+      }
+
+      if (field === "officeLatitude" || field === "officeLongitude") {
+        const isLatitude = field === "officeLatitude";
+        const min = isLatitude ? -90 : -180;
+        const max = isLatitude ? 90 : 180;
+
+        if (!isValidCoordinate(value, min, max)) {
+          return res.status(400).json({
+            success: false,
+            message: `${field} is outside the valid coordinate range.`,
+          });
+        }
+
+        updates[field] =
+          value === null || value === "" ? null : Number(value);
+
+        continue;
+      }
+
+      if (field === "workStart" || field === "workEnd") {
+        if (!isValidTime(value)) {
+          return res.status(400).json({
+            success: false,
+            message: `${field} must be a valid 24-hour time.`,
+          });
+        }
+
+        updates[field] = value;
+        continue;
+      }
+
+      if (field === "workspaceName") {
+        if (typeof value !== "string" || value.trim().length > 150) {
+          return res.status(400).json({
+            success: false,
+            message: "Workspace name must be text with at most 150 characters.",
+          });
+        }
+
+        updates[field] = value.trim();
+        continue;
+      }
+
+      if (field === "timezone") {
+        const allowed = [
+          "Asia/Karachi",
+          "Asia/Dubai",
+          "Asia/Kolkata",
+          "Europe/London",
+          "America/New_York",
+          "UTC",
+        ];
+
+        if (!allowed.includes(value)) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid timezone.",
+          });
+        }
+
+        updates[field] = value;
+        continue;
+      }
+
+      if (field === "dateFormat") {
+        const allowed = ["DD/MM/YYYY", "MM/DD/YYYY", "YYYY-MM-DD"];
+
+        if (!allowed.includes(value)) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid date format.",
+          });
+        }
+
+        updates[field] = value;
+      }
     }
 
-    if (phone !== undefined) user.phone = typeof phone === 'string' ? phone.trim() : '';
-    if (avatar !== undefined) user.avatar = avatar;
-
-    await user.save();
-
-    const safeUserData = safeUser(user.toObject ? user.toObject() : user);
-    return res.status(200).json({
-      success: true,
-      message: 'Profile updated successfully.',
-      user: safeUserData,
-      data: safeUserData
-    });
-  } catch (error) {
-    console.error('updateProfile error:', error);
-    return res.status(500).json({ success: false, message: 'Server error updating profile settings.' });
-  }
-};
-
-// PUT /api/settings/password or PATCH /api/settings/password
-const updatePassword = async (req, res) => {
-  try {
-    const { currentPassword, oldPassword, newPassword, password } = req.body;
-    const currentPass = currentPassword || oldPassword;
-    const newPass = newPassword || password;
-
-    if (!currentPass || !newPass) {
-      return res.status(400).json({ success: false, message: 'Current password and new password are required.' });
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Provide at least one valid setting.",
+      });
     }
 
-    if (newPass.length < 6) {
-      return res.status(400).json({ success: false, message: 'New password must be at least 6 characters.' });
+    const currentSettings = await WorkspaceSettings.findOne()
+      .select(
+        "attendanceGpsEnabled officeLatitude officeLongitude"
+      )
+      .maxTimeMS(QUERY_TIMEOUT_MS)
+      .lean()
+      .exec();
+
+    const finalGpsEnabled =
+      updates.attendanceGpsEnabled ??
+      currentSettings?.attendanceGpsEnabled ??
+      DEFAULT_SETTINGS.attendanceGpsEnabled;
+
+    const finalLatitude =
+      updates.officeLatitude !== undefined
+        ? updates.officeLatitude
+        : currentSettings?.officeLatitude ?? DEFAULT_SETTINGS.officeLatitude;
+
+    const finalLongitude =
+      updates.officeLongitude !== undefined
+        ? updates.officeLongitude
+        : currentSettings?.officeLongitude ?? DEFAULT_SETTINGS.officeLongitude;
+
+    if (
+      finalGpsEnabled &&
+      (finalLatitude === null ||
+        finalLongitude === null ||
+        finalLatitude === undefined ||
+        finalLongitude === undefined)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Set both office latitude and longitude before enabling attendance GPS.",
+      });
     }
 
-    const user = await User.findById(req.user._id).select('+password');
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found.' });
-    }
+    updates.updatedBy = req.user._id;
 
-    const isMatch = await user.comparePassword(currentPass);
-    if (!isMatch) {
-      return res.status(401).json({ success: false, message: 'Current password is incorrect.' });
-    }
-
-    user.password = newPass;
-    await user.save();
-
-    return res.status(200).json({ success: true, message: 'Password updated successfully.' });
-  } catch (error) {
-    console.error('updatePassword error:', error);
-    return res.status(500).json({ success: false, message: 'Server error updating password.' });
-  }
-};
-
-// GET /api/settings/business
-const getBusiness = async (req, res) => {
-  try {
-    const user = await User.findById(req.user._id).select('business').lean();
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found.' });
-    }
-    const business = user.business || {};
-    return res.status(200).json({ success: true, business, data: business });
-  } catch (error) {
-    console.error('getBusiness error:', error);
-    return res.status(500).json({ success: false, message: 'Server error retrieving business settings.' });
-  }
-};
-
-// PUT /api/settings/business or PATCH /api/settings/business
-const updateBusiness = async (req, res) => {
-  try {
-    const user = await User.findById(req.user._id);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found.' });
-    }
-
-    user.business = { ...(user.business || {}), ...req.body };
-    user.markModified('business');
-    await user.save();
-
-    return res.status(200).json({
-      success: true,
-      message: 'Business settings updated successfully.',
-      business: user.business,
-      data: user.business
-    });
-  } catch (error) {
-    console.error('updateBusiness error:', error);
-    return res.status(500).json({ success: false, message: 'Server error updating business settings.' });
-  }
-};
-
-// GET /api/settings/preferences
-const getPreferences = async (req, res) => {
-  try {
-    const user = await User.findById(req.user._id).select('preferences').lean();
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found.' });
-    }
-    const preferences = user.preferences || {};
-    return res.status(200).json({ success: true, preferences, data: preferences });
-  } catch (error) {
-    console.error('getPreferences error:', error);
-    return res.status(500).json({ success: false, message: 'Server error retrieving preferences.' });
-  }
-};
-
-// PUT /api/settings/preferences or PATCH /api/settings/preferences
-const updatePreferences = async (req, res) => {
-  try {
-    const user = await User.findById(req.user._id);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found.' });
-    }
-
-    user.preferences = { ...(user.preferences || {}), ...req.body };
-    user.markModified('preferences');
-    await user.save();
-
-    return res.status(200).json({
-      success: true,
-      message: 'Preferences updated successfully.',
-      preferences: user.preferences,
-      data: user.preferences
-    });
-  } catch (error) {
-    console.error('updatePreferences error:', error);
-    return res.status(500).json({ success: false, message: 'Server error updating preferences.' });
-  }
-};
-
-// GET /api/settings/notifications
-const getNotificationPreferences = async (req, res) => {
-  try {
-    const user = await User.findById(req.user._id).select('notificationPreferences').lean();
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found.' });
-    }
-    const notificationPreferences = user.notificationPreferences || {};
-    return res.status(200).json({ success: true, notificationPreferences, data: notificationPreferences });
-  } catch (error) {
-    console.error('getNotificationPreferences error:', error);
-    return res.status(500).json({ success: false, message: 'Server error retrieving notification preferences.' });
-  }
-};
-
-// PUT /api/settings/notifications or PATCH /api/settings/notifications
-const updateNotificationPreferences = async (req, res) => {
-  try {
-    const user = await User.findById(req.user._id);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found.' });
-    }
-
-    user.notificationPreferences = { ...(user.notificationPreferences || {}), ...req.body };
-    user.markModified('notificationPreferences');
-    await user.save();
-
-    return res.status(200).json({
-      success: true,
-      message: 'Notification preferences updated successfully.',
-      notificationPreferences: user.notificationPreferences,
-      data: user.notificationPreferences
-    });
-  } catch (error) {
-    console.error('updateNotificationPreferences error:', error);
-    return res.status(500).json({ success: false, message: 'Server error updating notification preferences.' });
-  }
-};
-
-// GET /api/settings/integrations
-const getIntegrations = async (req, res) => {
-  try {
-    const user = await User.findById(req.user._id).select('integrations').lean();
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found.' });
-    }
-    const integrations = user.integrations || {};
-    return res.status(200).json({ success: true, integrations, data: integrations });
-  } catch (error) {
-    console.error('getIntegrations error:', error);
-    return res.status(500).json({ success: false, message: 'Server error retrieving integrations.' });
-  }
-};
-
-// PUT /api/settings/integrations or PATCH /api/settings/integrations
-const updateIntegrations = async (req, res) => {
-  try {
-    const user = await User.findById(req.user._id);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found.' });
-    }
-
-    user.integrations = { ...(user.integrations || {}), ...req.body };
-    user.markModified('integrations');
-    await user.save();
+    const settings = await WorkspaceSettings.findOneAndUpdate(
+      {},
+      { $set: updates },
+      {
+        new: true,
+        upsert: true,
+        runValidators: true,
+        setDefaultsOnInsert: true,
+        maxTimeMS: QUERY_TIMEOUT_MS,
+      }
+    ).exec();
 
     return res.status(200).json({
       success: true,
-      message: 'Integrations updated successfully.',
-      integrations: user.integrations,
-      data: user.integrations
+      message: "Settings saved successfully.",
+      data: serializeSettings(settings),
     });
   } catch (error) {
-    console.error('updateIntegrations error:', error);
-    return res.status(500).json({ success: false, message: 'Server error updating integrations.' });
+    return next(error);
   }
-};
-
-// GET /api/settings (bundle)
-const getAllSettings = async (req, res) => {
-  try {
-    const user = await User.findById(req.user._id).select('-password').lean();
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found.' });
-    }
-
-    let cleanAvatar = user.avatar || null;
-    if (typeof cleanAvatar === 'string' && cleanAvatar.startsWith('data:image') && cleanAvatar.length > 1000) {
-      cleanAvatar = null;
-    }
-
-    const settingsData = {
-      profile: {
-        id: user._id,
-        _id: user._id,
-        name: user.name,
-        email: user.email,
-        phone: user.phone || '',
-        avatar: cleanAvatar,
-        role: user.role,
-        status: user.status
-      },
-      business: user.business || {},
-      preferences: user.preferences || {},
-      notificationPreferences: user.notificationPreferences || {},
-      integrations: user.integrations || {}
-    };
-
-    return res.status(200).json({
-      success: true,
-      settings: settingsData,
-      data: settingsData
-    });
-  } catch (error) {
-    console.error('getAllSettings error:', error);
-    return res.status(500).json({ success: false, message: 'Server error retrieving settings.' });
-  }
-};
-
-module.exports = {
-  getProfile,
-  updateProfile,
-  updatePassword,
-  changePassword: updatePassword,
-  getBusiness,
-  updateBusiness,
-  getPreferences,
-  updatePreferences,
-  getNotificationPreferences,
-  updateNotificationPreferences,
-  getIntegrations,
-  updateIntegrations,
-  getAllSettings
 };

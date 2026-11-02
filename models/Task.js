@@ -1,60 +1,31 @@
-const mongoose = require('mongoose');
+import mongoose from "mongoose";
 
-const TaskSchema = new mongoose.Schema(
+const taskSchema = new mongoose.Schema(
   {
     title: {
       type: String,
-      required: [true, 'Task title is required'],
+      required: [true, "Task title is required"],
       trim: true,
-      minlength: [1, 'Title cannot be empty'],
+      maxlength: 200,
     },
 
     description: {
       type: String,
       trim: true,
-      default: '',
-    },
-
-    createdBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
-      required: [true, 'Created by is required'],
+      maxlength: 5000,
+      default: "",
     },
 
     assignedTo: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
-      required: [true, 'Assigned to is required'],
+      ref: "User",
+      required: true,
     },
 
-    contact: {
+    assignedBy: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'Contact',
-      default: null,
-    },
-
-    contactId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Contact',
-      default: null,
-    },
-
-    category: {
-      type: String,
-      trim: true,
-      default: 'General',
-    },
-
-    priority: {
-      type: String,
-      enum: ['Low', 'Medium', 'High', 'Urgent'],
-      default: 'Medium',
-    },
-
-    status: {
-      type: String,
-      enum: ['Pending', 'In Progress', 'Completed', 'Cancelled'],
-      default: 'Pending',
+      ref: "User",
+      required: true,
     },
 
     dueDate: {
@@ -62,42 +33,67 @@ const TaskSchema = new mongoose.Schema(
       default: null,
     },
 
-    completedAt: {
+    priority: {
+      type: String,
+      enum: ["low", "medium", "high", "urgent"],
+      default: "medium",
+      index: true,
+    },
+
+    status: {
+      type: String,
+      enum: [
+        "pending",
+        "in_progress",
+        "submitted",
+        "approved",
+        "rejected",
+        "completed",
+      ],
+      default: "pending",
+    },
+
+    approvalStatus: {
+      type: String,
+      enum: ["not_required", "pending", "approved", "rejected"],
+      default: "not_required",
+    },
+
+    approvalBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+
+    approvedAt: {
       type: Date,
       default: null,
     },
 
+    rejectionReason: {
+      type: String,
+      trim: true,
+      maxlength: 1000,
+      default: "",
+    },
+
     attachments: [
       {
-        url: {
+        name: {
           type: String,
-          trim: true,
           required: true,
+          maxlength: 255,
         },
 
-        filename: {
+        path: {
           type: String,
-          trim: true,
-        },
-
-        originalName: {
-          type: String,
-          trim: true,
-        },
-
-        fileType: {
-          type: String,
-          trim: true,
-        },
-
-        size: {
-          type: Number,
-          min: 0,
+          required: true,
         },
 
         uploadedBy: {
           type: mongoose.Schema.Types.ObjectId,
-          ref: 'User',
+          ref: "User",
+          required: true,
         },
 
         uploadedAt: {
@@ -107,98 +103,23 @@ const TaskSchema = new mongoose.Schema(
       },
     ],
 
-    comments: [
-      {
-        user: {
-          type: mongoose.Schema.Types.ObjectId,
-          ref: 'User',
-          required: true,
-        },
-
-        text: {
-          type: String,
-          required: true,
-          trim: true,
-        },
-
-        createdAt: {
-          type: Date,
-          default: Date.now,
-        },
-      },
-    ],
-
-    activity: [
-      {
-        user: {
-          type: mongoose.Schema.Types.ObjectId,
-          ref: 'User',
-        },
-
-        action: {
-          type: String,
-          required: true,
-        },
-
-        details: {
-          type: String,
-          default: '',
-        },
-
-        timestamp: {
-          type: Date,
-          default: Date.now,
-        },
-      },
-    ],
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
   },
   {
     timestamps: true,
+    versionKey: false,
   }
 );
 
-/*
- * =========================================================
- * PERFORMANCE INDEXES
- * =========================================================
- */
+// Supports task filtering and sorting.
+taskSchema.index({ assignedTo: 1, status: 1, createdAt: -1 });
+taskSchema.index({ status: 1, createdAt: -1 });
+taskSchema.index({ createdAt: -1 });
 
-// Dashboard / recent tasks
-TaskSchema.index({
-  createdAt: -1,
-});
+const Task = mongoose.model("Task", taskSchema);
 
-// User-specific task lists
-TaskSchema.index({
-  assignedTo: 1,
-  createdAt: -1,
-});
-
-TaskSchema.index({
-  createdBy: 1,
-  createdAt: -1,
-});
-
-// Contact-based task lookups
-TaskSchema.index({
-  contact: 1,
-});
-
-TaskSchema.index({
-  contactId: 1,
-});
-
-// Task filtering
-TaskSchema.index({
-  status: 1,
-});
-
-TaskSchema.index({
-  priority: 1,
-});
-
-TaskSchema.index({
-  dueDate: 1,
-});
-
-module.exports = mongoose.model('Task', TaskSchema);
+export default Task;

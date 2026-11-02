@@ -1,192 +1,208 @@
-const jwt = require("jsonwebtoken");
-const mongoose = require("mongoose");
-const User = require("../models/User");
 
-// Read a Bearer token, cookie token, or x-auth-token header.
+import jwt from "jsonwebtoken";
+import User from "../models/User.js";
+
+const COOKIE_NAME = process.env.COOKIE_NAME || "localpro_token";
+
+const USER_CACHE_TTL_MS = 5000;
+const QUERY_TIMEOUT_MS = 3000;
+const MAX_CACHE_SIZE = 5000;
+
+const userCache = new Map();
+const pendingUserQueries = new Map();
+
+// ----------------------------------------------------
+// ACTIVE USER CACHE
+// ----------------------------------------------------
+
+const getActiveUser = async (userId) => {
+  const now = Date.now();
+  const cached = userCache.get(userId);
+
+  if (cached && cached.expiresAt > now) {
+    userCache.delete(userId);
+    userCache.set(userId, cached);
+
+    return cached.user;
+  }
+
+  if (cached) {
+    userCache.delete(userId);
+  }
+
+  const pendingQuery = pendingUserQueries.get(userId);
+
+  if (pendingQuery) {
+    return pendingQuery;
+  }
+
+  const query = User.findById(userId)
+    .select("_id name username email role status")
+    .lean()
+    .maxTimeMS(QUERY_TIMEOUT_MS)
+    .exec()
+    .then((user) => {
+      if (user && user.status === "active") {
+        if (userCache.size >= MAX_CACHE_SIZE) {
+          const oldestKey = userCache.keys().next().value;
+
+          if (oldestKey) {
+            userCache.delete(oldestKey);
+          }
+        }
+
+        userCache.set(userId, {
+          user,
+          expiresAt: Date.now() + USER_CACHE_TTL_MS,
+        });
+      }
+
+      return user;
+    })
+    .finally(() => {
+      pendingUserQueries.delete(userId);
+    });
+
+  pendingUserQueries.set(userId, query);
+
+  return query;
+};
+
+// ----------------------------------------------------
+// TOKEN EXTRACTION
+// Prefer Authorization header over cookie.
+// ----------------------------------------------------
+
 const getTokenFromRequest = (req) => {
   const authorization = req.headers?.authorization;
 
-  if (typeof authorization === "string") {
-    const match = authorization.match(/^Bearer\s+(.+)$/i);
+  if (authorization && /^Bearer\s+/i.test(authorization)) {
+    const bearerToken = authorization
+      .replace(/^Bearer\s+/i, "")
+      .trim();
 
-    if (match && match[1].trim()) {
-      return match[1].trim();
+    if (bearerToken) {
+      return bearerToken;
     }
   }
 
-  const cookieToken = req.cookies?.token;
+  const cookieToken = req.cookies?.[COOKIE_NAME];
+
   if (typeof cookieToken === "string" && cookieToken.trim()) {
     return cookieToken.trim();
-  }
-
-  const headerToken = req.headers?.["x-auth-token"];
-  if (typeof headerToken === "string" && headerToken.trim()) {
-    return headerToken.trim();
   }
 
   return null;
 };
 
-const sendAccountStatusError = (user, res) => {
-  if (!user) {
-    return false;
-  }
+// ----------------------------------------------------
+// CACHE INVALIDATION
+// ----------------------------------------------------
 
-  const status =
-    typeof user.status === "string" ? user.status.trim().toLowerCase() : "";
+export const invalidateUserAuthCache = (userId) => {
+  if (!userId) return;
 
-  if (user.isDeleted === true) {
-    res.status(401).json({
-      success: false,
-      message:
-        "Your account has been deleted. Please contact the administrator.",
-    });
-    return true;
-  }
-
-  if (user.isActive === false || status === "inactive") {
-    res.status(403).json({
-      success: false,
-      message: "Your account is inactive.",
-    });
-    return true;
-  }
-
-  if (status === "blocked") {
-    res.status(403).json({
-      success: false,
-      message: "Your account has been blocked.",
-    });
-    return true;
-  }
-
-  if (status === "pending") {
-    res.status(403).json({
-      success: false,
-      message: "Your account is pending approval.",
-    });
-    return true;
-  }
-
-  return false;
+  userCache.delete(String(userId));
 };
 
-// Verify the JWT and reload account status from MongoDB on each protected request.
-const protect = async (req, res, next) => {
+// ----------------------------------------------------
+// AUTHENTICATION MIDDLEWARE
+// ----------------------------------------------------
+
+export const protect = async (req, res, next) => {
   try {
     const token = getTokenFromRequest(req);
 
     if (!token) {
       return res.status(401).json({
         success: false,
-        message: "No token provided. Access denied.",
+        message: "Authentication required. Please log in.",
       });
     }
 
-    const jwtSecret = process.env.JWT_SECRET;
+    if (!process.env.JWT_SECRET) {
+      console.error("[AUTH ERROR] JWT_SECRET is missing.");
 
-    if (!jwtSecret) {
-      console.error("JWT_SECRET is missing from environment variables.");
       return res.status(500).json({
         success: false,
-        message: "Server authentication configuration error.",
+        message: "Authentication configuration error.",
       });
     }
 
     let decoded;
 
     try {
-      // Tokens generated by this app use the HS256 signing algorithm.
-      decoded = jwt.verify(token, jwtSecret, {
-        algorithms: ["HS256"],
-      });
+      decoded = jwt.verify(token, process.env.JWT_SECRET);
     } catch (error) {
-      if (error?.name === "TokenExpiredError") {
+      if (
+        [
+          "TokenExpiredError",
+          "JsonWebTokenError",
+          "NotBeforeError",
+        ].includes(error.name)
+      ) {
         return res.status(401).json({
           success: false,
-          message: "Token has expired. Please login again.",
+          message: "Invalid or expired authentication token.",
         });
       }
 
-      return res.status(401).json({
-        success: false,
-        message: "Invalid token.",
-      });
+      throw error;
     }
 
     const userId =
-      decoded?.id || decoded?._id || decoded?.userId || decoded?.sub;
+      decoded?.id ||
+      decoded?._id ||
+      decoded?.sub;
 
     if (
-      typeof userId !== "string" ||
-      !userId.trim() ||
-      !mongoose.isValidObjectId(userId.trim())
+      !userId ||
+      !/^[a-f\d]{24}$/i.test(String(userId))
     ) {
       return res.status(401).json({
         success: false,
-        message: "Invalid token payload.",
+        message: "Invalid authentication token payload.",
       });
     }
 
-    const user = await User.findById(userId.trim())
-      .select("_id name email role isDeleted isActive status")
-      .lean();
+    if (User.db?.readyState !== 1) {
+      return res.status(503).json({
+        success: false,
+        message: "Database connection is not ready. Please try again.",
+      });
+    }
+
+    const normalizedUserId = String(userId);
+
+    const user = await getActiveUser(normalizedUserId);
 
     if (!user) {
+      userCache.delete(normalizedUserId);
+
       return res.status(401).json({
         success: false,
-        message: "User no longer exists. Please login again.",
+        message: "User account not found or inactive.",
       });
     }
 
-    if (sendAccountStatusError(user, res)) {
-      return;
+    if (user.status !== "active") {
+      userCache.delete(normalizedUserId);
+
+      return res.status(403).json({
+        success: false,
+        message: "Your account is not active.",
+      });
     }
 
-    // Keep the authenticated user object small and consistent for controllers.
     req.user = user;
 
     return next();
   } catch (error) {
     console.error(
-      "Authentication middleware error:",
-      error?.message || "Unknown authentication error"
+      `[AUTH ERROR] ${req.method} ${req.originalUrl}:`,
+      error.message
     );
 
-    return res.status(500).json({
-      success: false,
-      message: "Server error during authentication.",
-    });
+    return next(error);
   }
-};
-
-// Usage: authorize("admin") or authorize("admin", "manager").
-const authorize = (...roles) => {
-  return (req, res, next) => {
-    if (!req.user) {
-      return res.status(401).json({
-        success: false,
-        message: "Authentication required.",
-      });
-    }
-
-    // Defend against routes accidentally using authorize without protect.
-    if (sendAccountStatusError(req.user, res)) {
-      return;
-    }
-
-    if (!roles.includes(req.user.role)) {
-      return res.status(403).json({
-        success: false,
-        message: `Access denied. Required role: ${roles.join(" or ")}.`,
-      });
-    }
-
-    return next();
-  };
-};
-
-module.exports = {
-  protect,
-  authorize,
 };

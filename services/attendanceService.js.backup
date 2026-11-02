@@ -1,0 +1,195 @@
+import Attendance from "../models/Attendance.js";
+import { createNotification } from "./notificationService.js";
+
+export const getTodayDate = () => {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Karachi",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+};
+
+const getDistanceInMeters = (lat1, lon1, lat2, lon2) => {
+  const toRadians = (degrees) => (degrees * Math.PI) / 180;
+  const earthRadiusMeters = 6371000;
+
+  const dLat = toRadians(lat2 - lat1);
+  const dLon = toRadians(lon2 - lon1);
+
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRadians(lat1)) *
+      Math.cos(toRadians(lat2)) *
+      Math.sin(dLon / 2) ** 2;
+
+  return (
+    earthRadiusMeters *
+    2 *
+    Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+  );
+};
+
+const verifyAttendanceLocation = async (latitude, longitude) => {
+  const officeLatitude = Number(process.env.OFFICE_LATITUDE);
+  const officeLongitude = Number(process.env.OFFICE_LONGITUDE);
+  const radius = Number(process.env.ATTENDANCE_RADIUS_METERS || 200);
+
+  if (
+    !Number.isFinite(officeLatitude) ||
+    !Number.isFinite(officeLongitude) ||
+    process.env.OFFICE_LATITUDE?.trim() === "" ||
+    process.env.OFFICE_LONGITUDE?.trim() === "" ||
+    officeLatitude < -90 ||
+    officeLatitude > 90 ||
+    officeLongitude < -180 ||
+    officeLongitude > 180
+  ) {
+    throw new Error("Office GPS location is not configured correctly in .env.");
+  }
+
+  if (!Number.isFinite(radius) || radius < 10 || radius > 10000) {
+    throw new Error(
+      "ATTENDANCE_RADIUS_METERS must be between 10 and 10000."
+    );
+  }
+
+  if (
+    typeof latitude !== "number" ||
+    typeof longitude !== "number" ||
+    !Number.isFinite(latitude) ||
+    !Number.isFinite(longitude) ||
+    latitude < -90 ||
+    latitude > 90 ||
+    longitude < -180 ||
+    longitude > 180
+  ) {
+    throw new Error(
+      "Location permission is required. Allow location access and try again."
+    );
+  }
+
+  const distance = getDistanceInMeters(
+    latitude,
+    longitude,
+    officeLatitude,
+    officeLongitude
+  );
+
+  if (distance > radius) {
+    throw new Error(
+      `Attendance is allowed only within ${radius} meters of the office. You are approximately ${Math.round(distance)} meters away.`
+    );
+  }
+};
+
+export const checkInUser = async ({
+  userId,
+  latitude = null,
+  longitude = null,
+  createdBy = userId,
+}) => {
+  await verifyAttendanceLocation(latitude, longitude);
+
+  const date = getTodayDate();
+
+  const existing = await Attendance.findOne({
+    user: userId,
+    date,
+  });
+
+  if (existing?.checkIn) {
+    throw new Error("You have already checked in today.");
+  }
+
+  return Attendance.findOneAndUpdate(
+    { user: userId, date },
+    {
+      $set: {
+        checkIn: new Date(),
+        checkInLocation: { latitude, longitude },
+        status: "present",
+        createdBy,
+      },
+    },
+    {
+      new: true,
+      upsert: true,
+      runValidators: true,
+      setDefaultsOnInsert: true,
+    }
+  );
+};
+
+export const checkOutUser = async ({
+  userId,
+  latitude = null,
+  longitude = null,
+}) => {
+  await verifyAttendanceLocation(latitude, longitude);
+
+  const date = getTodayDate();
+
+  const attendance = await Attendance.findOne({
+    user: userId,
+    date,
+  });
+
+  if (!attendance?.checkIn) {
+    throw new Error("You must check in before checking out.");
+  }
+
+  if (attendance.checkOut) {
+    throw new Error("You have already checked out today.");
+  }
+
+  attendance.checkOut = new Date();
+  attendance.checkOutLocation = { latitude, longitude };
+
+  const durationMs = attendance.checkOut - attendance.checkIn;
+  const hoursWorked = durationMs / (1000 * 60 * 60);
+
+  if (hoursWorked < 4) {
+    attendance.status = "half_day";
+  }
+
+  await attendance.save();
+
+  return attendance;
+};
+
+export const getUserAttendance = async ({
+  userId,
+  startDate,
+  endDate,
+  limit = 100,
+}) => {
+  const filter = { user: userId };
+
+  if (startDate || endDate) {
+    filter.date = {};
+
+    if (startDate) filter.date.$gte = startDate;
+    if (endDate) filter.date.$lte = endDate;
+  }
+
+  return Attendance.find(filter)
+    .sort({ date: -1 })
+    .limit(Math.min(Math.max(Number(limit) || 100, 1), 200))
+    .lean();
+};
+
+export const notifyAttendanceEvent = async ({
+  recipient,
+  sender = null,
+  title,
+  message,
+}) => {
+  return createNotification({
+    recipient,
+    sender,
+    title,
+    message,
+    type: "attendance",
+  });
+};
